@@ -13,6 +13,7 @@ import aiohttp
 try:
     from pytgcalls import GroupCallFactory
     from pytgcalls.exceptions import GroupCallNotFoundError
+    NotInGroupCallError = GroupCallNotFoundError
 except ImportError:
     from pathlib import Path
 
@@ -61,6 +62,21 @@ except ImportError:
                 await self._app.start()
                 self._started = True
 
+        async def _get_active_call(self):
+            active = self._app.get_active_call(self._chat)
+            if asyncio.iscoroutine(active):
+                return await active
+            return active
+
+        @staticmethod
+        def _ensure_valid_source(source):
+            if source is None:
+                raise ValueError("Empty audio source")
+            source = str(source).strip()
+            if not source:
+                raise ValueError("Empty audio source")
+            return source
+
         def on_network_status_changed(self, callback):
             self._network_callback = callback
 
@@ -104,12 +120,13 @@ except ImportError:
 
         async def start_audio(self, source):
             await self._ensure_started()
+            source = self._ensure_valid_source(source)
             self._current_source = source
             self._current_stream = AudioPiped(source)
             if self._chat is None:
                 raise GroupCallNotFoundError()
             try:
-                if self._app.get_active_call(self._chat) is None:
+                if await self._get_active_call() is None:
                     await self._app.join_group_call(self._chat, self._current_stream)
                 else:
                     await self._app.change_stream(self._chat, self._current_stream)
@@ -121,12 +138,13 @@ except ImportError:
 
         async def start_video(self, source, with_audio=True):
             await self._ensure_started()
+            source = self._ensure_valid_source(source)
             self._current_source = source
             self._current_stream = AudioVideoPiped(source)
             if self._chat is None:
                 raise GroupCallNotFoundError()
             try:
-                if self._app.get_active_call(self._chat) is None:
+                if await self._get_active_call() is None:
                     await self._app.join_group_call(self._chat, self._current_stream)
                 else:
                     await self._app.change_stream(self._chat, self._current_stream)
@@ -174,6 +192,7 @@ except ImportError:
             await self._ensure_started()
             if self._chat is None:
                 raise GroupCallNotFoundError()
+            source = self._ensure_valid_source(source)
             self._current_source = source
             self._current_stream = AudioPiped(source)
             try:
@@ -191,6 +210,7 @@ from telethon.errors.rpcerrorlist import (
     ParticipantJoinMissingError,
     ChatSendMediaForbiddenError,
 )
+from telethon.errors.rpcbaseerrors import ForbiddenError
 from pyChampu import HNDLR, LOGS, asst, udB, vcClient
 from pyChampu._misc._decorators import compile_pattern
 from pyChampu.fns.helper import (
@@ -260,6 +280,11 @@ class Player:
             )
             self.group_call = _client.get_group_call()
             CLIENTS.update({chat: self.group_call})
+        # Guard against duplicate on_stream_end callbacks racing each other.
+        if not hasattr(self.group_call, "_queue_lock"):
+            self.group_call._queue_lock = asyncio.Lock()
+        if not hasattr(self.group_call, "_ending_in_progress"):
+            self.group_call._ending_in_progress = False
 
     async def make_vc_active(self):
         try:
@@ -317,15 +342,61 @@ class Player:
             ACTIVE_CALLS.remove(chat)
 
     async def playout_ended_handler(self, call, source, mtype):
-        if os.path.exists(source):
-            os.remove(source)
-        await self.play_from_queue()
+        """Handle stream-end safely without double-processing queue events."""
+        lock = self.group_call._queue_lock
+        async with lock:
+            current_source = getattr(self.group_call, "_current_source", None)
+            if current_source and source and current_source != source:
+                LOGS.debug(
+                    "Ignoring stale stream-end event for %s (current: %s)",
+                    source,
+                    current_source,
+                )
+                return
+
+            try:
+                if source and os.path.exists(source):
+                    os.remove(source)
+            except Exception as e:
+                LOGS.debug(f"Error removing temp file: {e}")
+
+            try:
+                await self.play_from_queue()
+            except Exception as e:
+                LOGS.exception(f"Error in playout_ended_handler: {e}")
+
+    async def _notify_and_leave_after_queue_end(self):
+        if self.group_call._ending_in_progress:
+            return
+        self.group_call._ending_in_progress = True
+        try:
+            await vcClient.send_message(
+                self._current_chat,
+                "🎵 <strong>Song was finished.</strong> If you want to play more songs, give me commands.",
+                parse_mode="html",
+            )
+            # Give Telegram a moment to deliver the message before leaving VC.
+            await asyncio.sleep(1.5)
+            await self.group_call.stop()
+        finally:
+            if CLIENTS.get(self._chat):
+                del CLIENTS[self._chat]
+            self.group_call._ending_in_progress = False
 
     async def play_from_queue(self):
         chat_id = self._chat
         if chat_id in VIDEO_ON:
-            await self.group_call.stop_video()
-            VIDEO_ON.pop(chat_id)
+            try:
+                await self.group_call.stop_video()
+                VIDEO_ON.pop(chat_id)
+            except Exception as e:
+                LOGS.debug(f"Error stopping video: {e}")
+        
+        # Queue finished: notify and leave VC cleanly.
+        if not VC_QUEUE.get(chat_id) or not VC_QUEUE[chat_id]:
+            await self._notify_and_leave_after_queue_end()
+            return
+        
         try:
             song, title, link, thumb, from_user, pos, dur = await get_from_queue(
                 chat_id
@@ -333,44 +404,67 @@ class Player:
             try:
                 await self.group_call.start_audio(song)
             except ParticipantJoinMissingError:
-                await self.vc_joiner()
+                LOGS.info("ParticipantJoinMissingError, attempting rejoin")
+                if not (await self.vc_joiner()):
+                    return
                 await self.group_call.start_audio(song)
+            except NotInGroupCallError:
+                LOGS.info("NotInGroupCallError, attempting rejoin")
+                if not (await self.vc_joiner()):
+                    return
+                await self.group_call.start_audio(song)
+            
             if MSGID_CACHE.get(chat_id):
-                await MSGID_CACHE[chat_id].delete()
+                try:
+                    await MSGID_CACHE[chat_id].delete()
+                except Exception:
+                    pass
                 del MSGID_CACHE[chat_id]
+            
             text = f"<strong>🎧 Now playing #{pos}: <a href={link}>{title}</a>\n⏰ Duration:</strong> <code>{dur}</code>\n👤 <strong>Requested by:</strong> {from_user}"
+            title_only_text = f"<strong>🎧 Now playing #{pos}:</strong> <code>{title}</code>"
 
             try:
                 xx = await vcClient.send_message(
                     self._current_chat,
-                    f"<strong>🎧 Now playing #{pos}: <a href={link}>{title}</a>\n⏰ Duration:</strong> <code>{dur}</code>\n👤 <strong>Requested by:</strong> {from_user}",
+                    text,
                     file=thumb,
                     link_preview=False,
                     parse_mode="html",
                 )
 
-            except ChatSendMediaForbiddenError:
+            except (ChatSendMediaForbiddenError, ForbiddenError):
                 xx = await vcClient.send_message(
-                    self._current_chat, text, link_preview=False, parse_mode="html"
+                    self._current_chat,
+                    title_only_text,
+                    link_preview=False,
+                    parse_mode="html",
                 )
-            MSGID_CACHE.update({chat_id: xx})
-            VC_QUEUE[chat_id].pop(pos)
-            if not VC_QUEUE[chat_id]:
-                VC_QUEUE.pop(chat_id)
+            except Exception as msg_err:
+                LOGS.exception(f"Error sending now playing message: {msg_err}")
+                xx = None
+            
+            if xx:
+                MSGID_CACHE.update({chat_id: xx})
+            
+            # Remove now-playing song from queue only after start succeeds.
+            try:
+                VC_QUEUE[chat_id].pop(pos)
+                if not VC_QUEUE[chat_id]:
+                    VC_QUEUE.pop(chat_id)
+            except (KeyError, IndexError):
+                pass
 
-        except (IndexError, KeyError):
-            await self.group_call.stop()
-            del CLIENTS[self._chat]
-            await vcClient.send_message(
-                self._current_chat,
-                f"• Successfully Left Vc : <code>{chat_id}</code> •",
-                parse_mode="html",
-            )
+        except (IndexError, KeyError) as e:
+            # Queue is empty at this point; notify and leave VC.
+            LOGS.info(f"Queue empty in chat {chat_id}: {e}")
+            await self._notify_and_leave_after_queue_end()
         except Exception as er:
-            LOGS.exception(er)
+            # For transient errors, keep VC connected and notify.
+            LOGS.exception(f"Error playing next song: {er}")
             await vcClient.send_message(
                 self._current_chat,
-                f"<strong>ERROR:</strong> <code>{format_exc()}</code>",
+                f"⚠️ <strong>Error playing next song:</strong> <code>{str(er)[:100]}</code>",
                 parse_mode="html",
             )
 
@@ -514,7 +608,7 @@ async def download(query):
         else:
             link = await _api_search_youtube_link(query)
             if not link:
-                link = await get_yt_link(query)
+                link = get_yt_link(query)
             if not link:
                 raise ValueError("No playable YouTube result found")
             title = link
@@ -535,8 +629,82 @@ async def get_stream_link(ytlink):
                 k = x["url"]
     return k
     """
-    stream = await bash(f'yt-dlp -g -f "best[height<=?720][width<=?1280]" {ytlink}')
-    return stream[0]
+    if isinstance(ytlink, (list, tuple)):
+        ytlink = ytlink[0] if ytlink else ""
+    ytlink = str(ytlink or "").strip()
+    if not ytlink:
+        raise ValueError("Could not resolve a playable stream URL")
+
+    # Prefer yt-dlp Python API first to avoid shell parsing issues on Windows.
+    direct = await _extract_stream_with_ytdlp(ytlink)
+    if direct:
+        return direct
+
+    # Shell fallback with explicit URL quoting for cmd/powershell safety.
+    safe_link = ytlink.replace('"', '\\"')
+    quoted = '"' + safe_link + '"'
+    out, _ = await bash(
+        f'yt-dlp -g -f "best[height<=?720][width<=?1280]" {quoted}'
+    )
+    primary = (out or "").strip().splitlines()
+    if primary and primary[0].strip():
+        return primary[0].strip()
+
+    out, _ = await bash(f"yt-dlp -g {quoted}")
+    primary = (out or "").strip().splitlines()
+    if primary and primary[0].strip():
+        return primary[0].strip()
+
+    raise ValueError("Could not resolve a playable stream URL")
+
+
+async def _extract_stream_with_ytdlp(ytlink):
+    if not YoutubeDL:
+        return None
+
+    def _pick_stream_url():
+        opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+            "extract_flat": False,
+        }
+        info = YoutubeDL(opts).extract_info(ytlink, download=False)
+        if not isinstance(info, dict):
+            return None
+
+        direct = info.get("url")
+        if isinstance(direct, str) and direct.strip():
+            return direct.strip()
+
+        formats = info.get("formats") or []
+        best_av = None
+        best_any = None
+        for fmt in formats:
+            if not isinstance(fmt, dict):
+                continue
+            url = fmt.get("url")
+            if not isinstance(url, str) or not url.strip():
+                continue
+            if best_any is None:
+                best_any = url.strip()
+
+            width = fmt.get("width")
+            height = fmt.get("height")
+            vcodec = str(fmt.get("vcodec") or "")
+            acodec = str(fmt.get("acodec") or "")
+            has_video = vcodec != "none"
+            has_audio = acodec != "none"
+            if has_video and has_audio:
+                if width and height and width <= 1280 and height <= 720:
+                    best_av = url.strip()
+        return best_av or best_any
+
+    try:
+        return await asyncio.to_thread(_pick_stream_url)
+    except Exception as ex:
+        LOGS.warning("yt-dlp API stream extraction failed: %s", str(ex)[:180])
+        return None
 
 
 def _extract_api_link(payload):
@@ -570,6 +738,92 @@ def _extract_api_link_deep(data):
     return None
 
 
+def _videosearch_to_metadata(data):
+    if not isinstance(data, dict):
+        return None
+    link = data.get("link")
+    if not isinstance(link, str) or not link.strip():
+        return None
+    vid = data.get("id")
+    thumb = None
+    if isinstance(vid, str) and vid.strip():
+        thumb = f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
+    return {
+        "link": link.strip(),
+        "title": str(data.get("title") or link).strip(),
+        "duration": data.get("duration") or "♾",
+        "thumb": thumb,
+    }
+
+
+async def _metadata_from_url(url, fallback_title=None):
+    url = str(url or "").strip()
+    if not url:
+        return None
+
+    title = fallback_title or url
+    duration = "Unknown"
+    thumb = None
+
+    if YoutubeDL:
+        def _extract():
+            opts = {
+                "quiet": True,
+                "no_warnings": True,
+                "noplaylist": True,
+                "extract_flat": False,
+            }
+            return YoutubeDL(opts).extract_info(url, download=False)
+
+        try:
+            info = await asyncio.to_thread(_extract)
+            if isinstance(info, dict):
+                title = str(info.get("title") or title).strip()
+                seconds = info.get("duration")
+                if isinstance(seconds, (int, float)) and seconds > 0:
+                    duration = time_formatter(int(seconds * 1000))
+                elif info.get("is_live"):
+                    duration = "♾"
+                thumb = info.get("thumbnail") or thumb
+                url = str(info.get("webpage_url") or info.get("original_url") or url).strip()
+        except Exception as ex:
+            LOGS.warning("yt-dlp metadata extraction failed: %s", str(ex)[:180])
+
+    return {
+        "link": url,
+        "title": title,
+        "duration": duration,
+        "thumb": thumb,
+    }
+
+
+async def _resolve_video_metadata(query):
+    query = str(query or "").strip()
+    if not query:
+        return None
+
+    if VideosSearch:
+        try:
+            search = await asyncio.to_thread(lambda: VideosSearch(query, limit=1).result())
+            results = (search or {}).get("result") or []
+            if results:
+                parsed = _videosearch_to_metadata(results[0])
+                if parsed:
+                    return parsed
+        except Exception as ex:
+            LOGS.warning("VideosSearch failed for '%s': %s", query, str(ex)[:180])
+
+    link = query if is_url_ok(query) else None
+    if not link:
+        link = await _api_search_youtube_link(query)
+    if not link:
+        link = get_yt_link(query)
+    if not link:
+        return None
+
+    return await _metadata_from_url(link, fallback_title=query)
+
+
 async def _api_search_youtube_link(query):
     encoded_query = quote_plus(query)
     timeout = aiohttp.ClientTimeout(total=8)
@@ -595,14 +849,12 @@ async def _api_search_youtube_link(query):
 
 
 async def vid_download(query):
-    search = VideosSearch(query, limit=1).result()
-    data = search["result"][0]
-    link = data["link"]
+    info = await _resolve_video_metadata(query)
+    if not info:
+        raise ValueError("No playable video result found")
+    link = info["link"]
     video = await get_stream_link(link)
-    title = data["title"]
-    thumb = f"https://i.ytimg.com/vi/{data['id']}/hqdefault.jpg"
-    duration = data.get("duration") or "♾"
-    return video, thumb, title, link, duration
+    return video, info.get("thumb"), info.get("title") or link, link, info.get("duration") or "Unknown"
 
 
 async def dl_playlist(chat, from_user, link):
@@ -626,29 +878,62 @@ async def dl_playlist(chat, from_user, link):
             add_to_queue(chat, None, title, z["link"], thumb, from_user, duration)
     """
     links = await get_videos_link(link)
+    if not links:
+        raise ValueError("Could not read playlist items")
+
+    async def _meta_for_playlist_item(item_link):
+        if VideosSearch:
+            try:
+                search = await asyncio.to_thread(
+                    lambda: VideosSearch(item_link, limit=1).result()
+                )
+                results = (search or {}).get("result") or []
+                if results:
+                    parsed = _videosearch_to_metadata(results[0])
+                    if parsed:
+                        return parsed
+            except Exception as ex:
+                LOGS.warning(
+                    "VideosSearch playlist lookup failed for '%s': %s",
+                    item_link,
+                    str(ex)[:180],
+                )
+
+        return await _metadata_from_url(item_link, fallback_title=item_link)
+
     try:
-        search = VideosSearch(links[0], limit=1).result()
-        vid1 = search["result"][0]
-        duration = vid1.get("duration") or "♾"
-        title = vid1["title"]
-        song = await get_stream_link(vid1["link"])
-        thumb = f"https://i.ytimg.com/vi/{vid1['id']}/hqdefault.jpg"
-        return song, thumb, title, vid1["link"], duration
+        first = await _meta_for_playlist_item(links[0])
+        if not first:
+            raise ValueError("Could not resolve first playlist video")
+        song = await get_stream_link(first["link"])
+        return (
+            song,
+            first.get("thumb"),
+            first.get("title") or links[0],
+            first["link"],
+            first.get("duration") or "Unknown",
+        )
     finally:
         for z in links[1:]:
             try:
-                search = VideosSearch(z, limit=1).result()
-                vid = search["result"][0]
-                duration = vid.get("duration") or "♾"
-                title = vid["title"]
-                thumb = f"https://i.ytimg.com/vi/{vid['id']}/hqdefault.jpg"
-                add_to_queue(chat, None, title, vid["link"], thumb, from_user, duration)
+                meta = await _meta_for_playlist_item(z)
+                if not meta:
+                    continue
+                add_to_queue(
+                    chat,
+                    None,
+                    meta.get("title") or z,
+                    meta["link"],
+                    meta.get("thumb"),
+                    from_user,
+                    meta.get("duration") or "Unknown",
+                )
             except Exception as er:
                 LOGS.exception(er)
 
 
 async def file_download(event, reply, fast_download=True):
-    thumb = "https://telegra.ph/file/f1b1754fc9d01998f24df.mp4"
+    thumb = "https://telegra.ph/file/abc578ecc222d28a861ba.mp4"
     title = reply.file.title or reply.file.name or f"{str(time())}.mp4"
     file = reply.file.name or f"{str(time())}.mp4"
     if fast_download:

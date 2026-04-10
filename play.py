@@ -18,6 +18,7 @@ import re,os
 from telethon.tl import types
 from . import vc_asst, get_string, inline_mention, add_to_queue, mediainfo, file_download, LOGS, is_url_ok, bash, download, Player, VC_QUEUE
 from telethon.errors.rpcerrorlist import ChatSendMediaForbiddenError, MessageIdInvalidError
+from telethon.errors.rpcbaseerrors import ForbiddenError
 
 
 @vc_asst("play")
@@ -75,6 +76,7 @@ async def play_music_(event):
         text = "🎸 <strong>Now playing: <a href={}>{}</a>\n⏰ Duration:</strong> <code>{}</code>\n👥 <strong>Chat:</strong> <code>{}</code>\n🙋‍♂ <strong>Requested by: {}</strong>".format(
             link, song_name, duration, chat, from_user
         )
+        title_only_text = f"🎸 <strong>Now playing:</strong> <code>{song_name}</code>"
         try:
             await xx.reply(
                 text,
@@ -83,8 +85,8 @@ async def play_music_(event):
                 parse_mode="html",
             )
             await xx.delete()
-        except ChatSendMediaForbiddenError:
-            await xx.eor(text, link_preview=False)
+        except (ChatSendMediaForbiddenError, ForbiddenError):
+            await xx.eor(title_only_text, link_preview=False, parse_mode="html")
         if thumb and os.path.exists(thumb):
             os.remove(thumb)
     else:
@@ -147,6 +149,7 @@ async def play_music_(event):
             text = "🎸 <strong>Now playing: <a href={}>{}</a>\n⏰ Duration:</strong> <code>{}</code>\n👥 <strong>Chat:</strong> <code>{}</code>\n🙋‍♂ <strong>Requested by: {}</strong>".format(
                 link, song_name, duration, chat, from_user
             )
+            title_only_text = f"🎸 <strong>Now playing:</strong> <code>{song_name}</code>"
             try:
                 await msg.reply(
                     text,
@@ -154,8 +157,8 @@ async def play_music_(event):
                     link_preview=False,
                     parse_mode="html",
                 )
-            except ChatSendMediaForbiddenError:
-                await msg.reply(text, link_preview=False, parse_mode="html")
+            except (ChatSendMediaForbiddenError, ForbiddenError):
+                await msg.reply(title_only_text, link_preview=False, parse_mode="html")
             if thumb and os.path.exists(thumb):
                 os.remove(thumb)
         else:
@@ -191,7 +194,7 @@ async def radio_mirchi(e):
     await ultSongs.group_call.start_audio(song)
     await xx.reply(
         f"• Started Radio 📻\n\n• Station : `{song}`",
-        file="https://telegra.ph/file/7a4e08bd04d628de71fc1.mp4",
+        file="https://telegra.ph/file/abc578ecc222d28a861ba.mp4d09d4461199bdc7786b01.mp4",
     )
     await xx.delete()
 
@@ -221,7 +224,7 @@ async def live_stream(e):
         return
     from_user = inline_mention(e.sender)
     await xx.reply(
-        "🎸 **Now playing:** [{}]({})\n⏰ **Duration:** `{}`\n👥 **Chat:** `{}`\n🙋‍♂ **Requested by:** {}".format(
+        "🎸 **Now playing:** [{}]({})\n⏰ **Duration:** `{}`\n👥 **Chat:** `{}`".format(
             title, link, duration, chat, from_user
         ),
         file=thumb,
