@@ -249,7 +249,11 @@ LOG_CHANNEL = udB.get_key("LOG_CHANNEL")
 ACTIVE_CALLS, VC_QUEUE = [], {}
 MSGID_CACHE, VIDEO_ON = {}, {}
 CLIENTS = {}
+STREAM_CACHE = {}
+STREAM_CACHE_TTL = 900
+LAST_WORKING_COOKIE_FILE = None
 API_URL = udB.get_key("YT_API_URL") or "https://shrutibots.site"
+YT_COOKIES_DIR = "/home/ubuntu/ProjectRoot/resources/cookies"
 SEARCH_ENDPOINTS = (
     "song/search",
     "songs/search",
@@ -517,13 +521,21 @@ def vc_asst(dec, **kwargs):
                     return
             try:
                 await func(e)
+            except ValueError as er:
+                msg = str(er).strip() or "Could not process this request."
+                LOGS.warning("VC command failed: %s", msg[:220])
+                try:
+                    await e.reply(f"❌ {msg}")
+                except Exception:
+                    pass
             except Exception:
-                LOGS.exception(Exception)
+                LOGS.exception("VC handler error")
                 await asst.send_message(
                     LOG_CHANNEL,
                     f"VC Error - <code>{UltVer}</code>\n\n<code>{e.text}</code>\n\n<code>{format_exc()}</code>",
                     parse_mode="html",
                 )
+
 
         vcClient.add_event_handler(
             vc_handler,
@@ -580,7 +592,7 @@ async def get_from_queue(chat_id):
     from_user = info["from_user"]
     duration = info["duration"]
     if not song:
-        song = await get_stream_link(link)
+        song = await get_stream_link(link, prefer_audio=True)
     return song, title, link, thumb, from_user, play_this, duration
 
 
@@ -614,11 +626,11 @@ async def download(query):
             title = link
             duration = "Unknown"
             thumb = None
-    dl = await get_stream_link(link)
+    dl = await get_stream_link(link, prefer_audio=True)
     return dl, thumb, title, link, duration
 
 
-async def get_stream_link(ytlink):
+async def get_stream_link(ytlink, prefer_audio=True):
     """
     info = YoutubeDL({}).extract_info(url=ytlink, download=False)
     k = ""
@@ -635,40 +647,165 @@ async def get_stream_link(ytlink):
     if not ytlink:
         raise ValueError("Could not resolve a playable stream URL")
 
-    # Prefer yt-dlp Python API first to avoid shell parsing issues on Windows.
-    direct = await _extract_stream_with_ytdlp(ytlink)
-    if direct:
-        return direct
+    cached = _stream_cache_get(ytlink, prefer_audio)
+    if cached:
+        return cached
 
-    # Shell fallback with explicit URL quoting for cmd/powershell safety.
-    safe_link = ytlink.replace('"', '\\"')
-    quoted = '"' + safe_link + '"'
-    out, _ = await bash(
-        f'yt-dlp -g -f "best[height<=?720][width<=?1280]" {quoted}'
-    )
-    primary = (out or "").strip().splitlines()
-    if primary and primary[0].strip():
-        return primary[0].strip()
+    # Priority: yt-dlp (no cookies) -> yt-dlp (all cookie files) -> API_URL.
+    cookie_files = [None] + _ordered_cookie_files()
+    last_error = ""
+    selector = "bestaudio/best" if prefer_audio else "best[height<=?720][width<=?1280]/best"
 
-    out, _ = await bash(f"yt-dlp -g {quoted}")
-    primary = (out or "").strip().splitlines()
-    if primary and primary[0].strip():
-        return primary[0].strip()
+    for cookie_file in cookie_files:
+        direct, api_error = await _extract_stream_with_ytdlp(
+            ytlink, cookie_file=cookie_file, prefer_audio=prefer_audio
+        )
+        if direct:
+            global LAST_WORKING_COOKIE_FILE
+            if cookie_file:
+                LAST_WORKING_COOKIE_FILE = cookie_file
+            _stream_cache_set(ytlink, prefer_audio, direct)
+            return direct
+        if api_error:
+            last_error = str(api_error)
 
+        safe_link = ytlink.replace('"', '\\"')
+        quoted = '"' + safe_link + '"'
+        cookie_arg = ""
+        if cookie_file:
+            safe_cookie = cookie_file.replace('"', '\\"')
+            cookie_arg = f' --cookies "{safe_cookie}"'
+
+        out, _ = await bash(
+            f'yt-dlp -g -f "{selector}"{cookie_arg} {quoted}'
+        )
+        primary = (out or "").strip().splitlines()
+        if primary and primary[0].strip():
+            stream_url = primary[0].strip()
+            if cookie_file:
+                LAST_WORKING_COOKIE_FILE = cookie_file
+            _stream_cache_set(ytlink, prefer_audio, stream_url)
+            return stream_url
+
+        out, err = await bash(f"yt-dlp -g{cookie_arg} {quoted}")
+        primary = (out or "").strip().splitlines()
+        if primary and primary[0].strip():
+            stream_url = primary[0].strip()
+            if cookie_file:
+                LAST_WORKING_COOKIE_FILE = cookie_file
+            _stream_cache_set(ytlink, prefer_audio, stream_url)
+            return stream_url
+        if err:
+            last_error = str(err)
+
+    api_stream = await _api_resolve_stream_url(ytlink, prefer_audio=prefer_audio)
+    if api_stream:
+        _stream_cache_set(ytlink, prefer_audio, api_stream)
+        return api_stream
+
+    if _is_youtube_bot_challenge(last_error):
+        raise ValueError(
+            "YouTube blocked playback. yt-dlp and cookies both failed. "
+            "Put valid cookies .txt/.json files in /home/ubuntu/ProjectRoot/resources/cookies"
+        )
     raise ValueError("Could not resolve a playable stream URL")
 
 
-async def _extract_stream_with_ytdlp(ytlink):
-    if not YoutubeDL:
+def _ytdlp_cookie_files():
+    out = []
+    seen = set()
+
+    # Optional explicit cookie file via env/db.
+    for key in ("YTDLP_COOKIES_FILE", "YT_COOKIES_FILE", "YTDLP_COOKIES", "YT_COOKIES"):
+        value = os.getenv(key)
+        if isinstance(value, str) and value.strip() and os.path.exists(value.strip()):
+            p = value.strip()
+            if p not in seen:
+                seen.add(p)
+                out.append(p)
+    try:
+        db_value = udB.get_key("YTDLP_COOKIES_FILE") or udB.get_key("YT_COOKIES_FILE")
+        if isinstance(db_value, str) and db_value.strip() and os.path.exists(db_value.strip()):
+            p = db_value.strip()
+            if p not in seen:
+                seen.add(p)
+                out.append(p)
+    except Exception:
+        pass
+
+    # Folder-based cookies requested by user.
+    if os.path.isdir(YT_COOKIES_DIR):
+        for name in sorted(os.listdir(YT_COOKIES_DIR)):
+            path = os.path.join(YT_COOKIES_DIR, name)
+            if not os.path.isfile(path):
+                continue
+            low = name.lower()
+            if not (low.endswith(".txt") or low.endswith(".json")):
+                continue
+            if path not in seen:
+                seen.add(path)
+                out.append(path)
+    return out
+
+
+def _ordered_cookie_files():
+    files = _ytdlp_cookie_files()
+    global LAST_WORKING_COOKIE_FILE
+    if LAST_WORKING_COOKIE_FILE and LAST_WORKING_COOKIE_FILE in files:
+        files.remove(LAST_WORKING_COOKIE_FILE)
+        files.insert(0, LAST_WORKING_COOKIE_FILE)
+    return files
+
+
+def _stream_cache_get(url, prefer_audio):
+    key = (str(url).strip(), bool(prefer_audio))
+    data = STREAM_CACHE.get(key)
+    if not data:
         return None
+    stream_url, ts = data
+    if (time() - ts) > STREAM_CACHE_TTL:
+        STREAM_CACHE.pop(key, None)
+        return None
+    return stream_url
+
+
+def _stream_cache_set(url, prefer_audio, stream_url):
+    key = (str(url).strip(), bool(prefer_audio))
+    STREAM_CACHE[key] = (stream_url, time())
+
+
+def _ytdlp_common_opts(cookie_file=None) -> dict:
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "extract_flat": False,
+    }
+    if not cookie_file:
+        files = _ordered_cookie_files()
+        cookie_file = files[0] if files else None
+    if cookie_file:
+        opts["cookiefile"] = cookie_file
+    return opts
+
+
+def _is_youtube_bot_challenge(error_text: str) -> bool:
+    text = str(error_text or "").lower()
+    checks = (
+        "sign in to confirm you're not a bot",
+        "sign in to confirm you’re not a bot",
+        "use --cookies-from-browser",
+        "use --cookies",
+    )
+    return any(c in text for c in checks)
+
+
+async def _extract_stream_with_ytdlp(ytlink, cookie_file=None, prefer_audio=True):
+    if not YoutubeDL:
+        return None, "yt-dlp not installed"
 
     def _pick_stream_url():
-        opts = {
-            "quiet": True,
-            "no_warnings": True,
-            "noplaylist": True,
-            "extract_flat": False,
-        }
+        opts = _ytdlp_common_opts(cookie_file=cookie_file)
         info = YoutubeDL(opts).extract_info(ytlink, download=False)
         if not isinstance(info, dict):
             return None
@@ -678,6 +815,7 @@ async def _extract_stream_with_ytdlp(ytlink):
             return direct.strip()
 
         formats = info.get("formats") or []
+        best_audio = None
         best_av = None
         best_any = None
         for fmt in formats:
@@ -695,16 +833,58 @@ async def _extract_stream_with_ytdlp(ytlink):
             acodec = str(fmt.get("acodec") or "")
             has_video = vcodec != "none"
             has_audio = acodec != "none"
+            if has_audio and not has_video:
+                abr = fmt.get("abr") or 0
+                prev_abr = best_audio[1] if best_audio else 0
+                if abr >= prev_abr:
+                    best_audio = (url.strip(), abr)
             if has_video and has_audio:
                 if width and height and width <= 1280 and height <= 720:
                     best_av = url.strip()
-        return best_av or best_any
+        if prefer_audio and best_audio:
+            return best_audio[0]
+        return best_av or (best_audio[0] if best_audio else None) or best_any
 
     try:
-        return await asyncio.to_thread(_pick_stream_url)
+        return await asyncio.to_thread(_pick_stream_url), None
     except Exception as ex:
-        LOGS.warning("yt-dlp API stream extraction failed: %s", str(ex)[:180])
+        msg = str(ex)[:220]
+        if cookie_file:
+            LOGS.warning("yt-dlp failed with cookie %s: %s", os.path.basename(cookie_file), msg)
+        elif _is_youtube_bot_challenge(msg):
+            LOGS.warning("yt-dlp blocked by YouTube bot challenge")
+        else:
+            LOGS.warning("yt-dlp API stream extraction failed: %s", msg)
+        return None, msg
+
+
+async def _api_resolve_stream_url(link, prefer_audio=True):
+    link = str(link or "").strip()
+    if not link:
         return None
+    timeout = aiohttp.ClientTimeout(total=10)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            media_type = "audio" if prefer_audio else "video"
+            params = {"url": link, "type": media_type}
+            async with session.get(f"{API_URL}/download", params=params) as response:
+                if response.status != 200:
+                    return None
+                data = await response.json(content_type=None)
+
+            for key in ("stream_url", "download_url", "url"):
+                val = data.get(key)
+                if isinstance(val, str) and val.startswith("http"):
+                    return val
+
+            token = data.get("download_token")
+            media_id = data.get("id") or data.get("video_id")
+            if token and media_id:
+                encoded = quote_plus(str(media_id))
+                return f"{API_URL}/stream/{encoded}?type={media_type}&token={token}"
+    except Exception as ex:
+        LOGS.warning("API stream resolver failed: %s", str(ex)[:180])
+    return None
 
 
 def _extract_api_link(payload):
@@ -767,12 +947,7 @@ async def _metadata_from_url(url, fallback_title=None):
 
     if YoutubeDL:
         def _extract():
-            opts = {
-                "quiet": True,
-                "no_warnings": True,
-                "noplaylist": True,
-                "extract_flat": False,
-            }
+            opts = _ytdlp_common_opts()
             return YoutubeDL(opts).extract_info(url, download=False)
 
         try:
@@ -853,7 +1028,7 @@ async def vid_download(query):
     if not info:
         raise ValueError("No playable video result found")
     link = info["link"]
-    video = await get_stream_link(link)
+    video = await get_stream_link(link, prefer_audio=False)
     return video, info.get("thumb"), info.get("title") or link, link, info.get("duration") or "Unknown"
 
 
@@ -905,7 +1080,7 @@ async def dl_playlist(chat, from_user, link):
         first = await _meta_for_playlist_item(links[0])
         if not first:
             raise ValueError("Could not resolve first playlist video")
-        song = await get_stream_link(first["link"])
+        song = await get_stream_link(first["link"], prefer_audio=True)
         return (
             song,
             first.get("thumb"),
