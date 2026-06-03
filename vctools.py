@@ -18,6 +18,7 @@
 """
 from . import vc_asst, Player, get_string, udB, YT_COOKIES_DIR, _ytdlp_cookie_files, LAST_WORKING_COOKIE_FILE, _ordered_cookie_files, _extract_stream_with_ytdlp
 import os
+from time import time
 
 
 @vc_asst("mutevc")

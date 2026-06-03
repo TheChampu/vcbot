@@ -273,7 +273,10 @@ CLIENTS = {}
 STREAM_CACHE = {}
 STREAM_CACHE_TTL = 900
 LAST_WORKING_COOKIE_FILE = None
-API_URL = udB.get_key("YT_API_URL") or "https://shrutibots.site"
+API_URL = os.environ.get("SHRUTI_API_URL") or udB.get_key("YT_API_URL") or "https://api.shrutibots.site"
+API_KEY = os.environ.get("SHRUTI_API_KEY", "ShrutiBotsP3A8xKwYFafG6SuSLTIM")
+DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR", "downloads")
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 YT_COOKIES_DIR = "/home/ubuntu/ProjectRoot/resources/cookies"
 SEARCH_ENDPOINTS = (
     "song/search",
@@ -939,7 +942,13 @@ async def _api_resolve_stream_url(link, prefer_audio=True):
         async with aiohttp.ClientSession(timeout=timeout) as session:
             media_type = "audio" if prefer_audio else "video"
             params = {"url": link, "type": media_type}
-            async with session.get(f"{API_URL}/download", params=params) as response:
+            if API_KEY:
+                params["api_key"] = API_KEY
+            headers = {}
+            if API_KEY:
+                headers["x-api-key"] = API_KEY
+                headers["Authorization"] = f"Bearer {API_KEY}"
+            async with session.get(f"{API_URL}/download", params=params, headers=headers) as response:
                 if response.status != 200:
                     return None
                 data = await response.json(content_type=None)
@@ -953,7 +962,10 @@ async def _api_resolve_stream_url(link, prefer_audio=True):
             media_id = data.get("id") or data.get("video_id")
             if token and media_id:
                 encoded = quote_plus(str(media_id))
-                return f"{API_URL}/stream/{encoded}?type={media_type}&token={token}"
+                stream_link = f"{API_URL}/stream/{encoded}?type={media_type}&token={token}"
+                if API_KEY:
+                    stream_link += f"&api_key={API_KEY}"
+                return stream_link
     except Exception as ex:
         LOGS.warning("API stream resolver failed: %s", str(ex)[:180])
     return None
@@ -1079,8 +1091,14 @@ async def _api_search_youtube_link(query):
             for endpoint in SEARCH_ENDPOINTS:
                 for param in ("query", "q", "search"):
                     api = f"{API_URL}/{endpoint}?{param}={encoded_query}"
+                    if API_KEY:
+                        api += f"&api_key={API_KEY}"
+                    headers = {}
+                    if API_KEY:
+                        headers["x-api-key"] = API_KEY
+                        headers["Authorization"] = f"Bearer {API_KEY}"
                     try:
-                        async with session.get(api) as response:
+                        async with session.get(api, headers=headers) as response:
                             if response.status != 200:
                                 continue
                             data = await response.json(content_type=None)
@@ -1185,7 +1203,7 @@ async def file_download(event, reply, fast_download=True):
     file = reply.file.name or f"{str(time())}.mp4"
     if fast_download:
         dl = await downloader(
-            f"vcbot/downloads/{file}",
+            os.path.join(DOWNLOAD_DIR, file),
             reply.media.document,
             event,
             time(),
@@ -1194,12 +1212,12 @@ async def file_download(event, reply, fast_download=True):
 
         dl = dl.name
     else:
-        dl = await reply.download_media()
+        dl = await reply.download_media(os.path.join(DOWNLOAD_DIR, ""))
     duration = (
         time_formatter(reply.file.duration * 1000) if reply.file.duration else "🤷‍♂️"
     )
     if reply.document.thumbs:
-        thumb = await reply.download_media("vcbot/downloads/", thumb=-1)
+        thumb = await reply.download_media(os.path.join(DOWNLOAD_DIR, ""), thumb=-1)
     return dl, thumb, title, reply.message_link, duration
 
 

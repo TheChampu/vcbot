@@ -14,7 +14,7 @@
    Stream Live YouTube
 """
 
-import re,os
+import re,os,asyncio
 from telethon.tl import types
 from . import vc_asst, get_string, inline_mention, add_to_queue, mediainfo, file_download, LOGS, is_url_ok, bash, download, ensure_vc, Player, VC_QUEUE
 from telethon.errors.rpcerrorlist import ChatSendMediaForbiddenError, MessageIdInvalidError
@@ -114,17 +114,24 @@ async def play_music_(event):
         return await msg.edit(
             "Use in Proper Format\n`.playfrom <channel username> ; <limit>`"
         )
-    input = event.text.split(maxsplit=1)[1]
-    if ";" in input:
+    input_str = event.text.split(maxsplit=1)[1]
+    if ";" in input_str:
         try:
-            limit = input.split(";")
-            input = limit[0].strip()
-            limit = int(limit[1].strip()) if limit[1].strip().isdigit() else 10
-            input = await event.client.parse_id(input)
+            parts = input_str.split(";", 1)
+            target = parts[0].strip()
+            limit = int(parts[1].strip()) if parts[1].strip().isdigit() else 10
         except (IndexError, ValueError):
-            pass
+            target = input_str.strip()
+    else:
+        target = input_str.strip()
+
     try:
-        fromchat = (await event.client.get_entity(input)).id
+        target = await event.client.parse_id(target)
+    except Exception:
+        pass
+
+    try:
+        fromchat = await event.client.get_entity(target)
     except Exception as er:
         return await msg.eor(str(er))
     await msg.eor("`• Started Playing from Channel....`")
@@ -214,8 +221,22 @@ async def live_stream(e):
         return await xx.eor(f"`{song}`\n\nNot a playable link.🥱")
     is_live_vid = False
     if re.search("youtu", song):
-        is_live_vid = (await bash(f'youtube-dl -j "{song}" | jq ".is_live"'))[0]
-    if is_live_vid != "true":
+        try:
+            from yt_dlp import YoutubeDL
+            def _extract():
+                return YoutubeDL({"quiet": True, "extract_flat": True}).extract_info(song, download=False)
+            info = await asyncio.to_thread(_extract)
+            is_live_vid = bool(info.get("is_live"))
+        except Exception as err:
+            LOGS.warning(f"Live check failed: {err}")
+            out, _ = await bash(f'yt-dlp -j "{song}"')
+            if out:
+                import json
+                try:
+                    is_live_vid = bool(json.loads(out).get("is_live"))
+                except Exception:
+                    pass
+    if not is_live_vid:
         return await xx.eor(f"Only Live Youtube Urls supported!\n{song}")
     ultSongs = Player(chat, e)
     was_connected = ultSongs.group_call.is_connected

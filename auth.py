@@ -103,12 +103,11 @@ async def _(e):
             userid = await e.client.parse_id(input)
             name = (await e.client.get_entity(userid)).first_name
         except ValueError as ex:
-            return await xx.edit(f"`{str(ex)}`", time=5)
+            return await xx.eor(f"`{str(ex)}`", time=5)
     else:
-        return await xx.edit(get_string("vcbot_17"), time=3)
+        return await xx.eor(get_string("vcbot_17"), time=3)
     if not is_vcsudo(userid):
         return await xx.eor(
-            xx,
             f"[{name}](tg://user?id={userid})` is not approved to use my Voice Chat Bot.`",
             time=5,
         )
@@ -119,7 +118,7 @@ async def _(e):
             time=5,
         )
     except Exception as ex:
-        return await xx.edit(f"`{ex}`", time=5)
+        return await xx.eor(f"`{ex}`", time=5)
 
 
 @vc_asst("vcaccess( (.*)|$)", from_users=owner_and_sudos(), vc_auth=False, allow_all=False)
