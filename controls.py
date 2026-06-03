@@ -23,7 +23,14 @@
 try:
     from pytgcalls.exceptions import NotConnectedError
 except ImportError:
-    from pytgcalls.exceptions import NotInGroupCallError as NotConnectedError
+    try:
+        from pytgcalls.exceptions import NotInGroupCallError as NotConnectedError
+    except ImportError:
+        try:
+            from pytgcalls.exceptions import NotInCallError as NotConnectedError
+        except ImportError:
+            class NotConnectedError(Exception):
+                pass
 
 from . import vc_asst, Player, get_string,CLIENTS,VIDEO_ON
 
@@ -40,7 +47,7 @@ async def join_(event):
         chat = event.chat_id
     ultSongs = Player(chat, event)
     if not ultSongs.group_call.is_connected:
-        await ultSongs.vc_joiner()
+        await ultSongs.vc_joiner(announce=True)
 
 
 @vc_asst("(leavevc|stopvc|stop|end)")
@@ -54,6 +61,8 @@ async def leaver(event):
     else:
         chat = event.chat_id
     ultSongs = Player(chat)
+    if not ultSongs.group_call.is_connected:
+        return await event.eor(get_string("vcbot_6"))
     await ultSongs.group_call.stop()
     if CLIENTS.get(chat):
         del CLIENTS[chat]
@@ -73,6 +82,8 @@ async def rejoiner(event):
     else:
         chat = event.chat_id
     ultSongs = Player(chat)
+    if not ultSongs.group_call.is_connected:
+        return await event.eor(get_string("vcbot_6"))
     try:
         await ultSongs.group_call.reconnect()
     except NotConnectedError:
@@ -97,6 +108,8 @@ async def volume_setter(event):
         chat = event.chat_id
     if vol:
         ultSongs = Player(chat)
+        if not ultSongs.group_call.is_connected:
+            return await event.eor(get_string("vcbot_6"))
         await ultSongs.group_call.set_my_volume(int(vol))
         if vol > 200:
             vol = 200
@@ -116,4 +129,6 @@ async def skipper(event):
     else:
         chat = event.chat_id
     ultSongs = Player(chat, event)
+    if not ultSongs.group_call.is_connected:
+        return await event.eor(get_string("vcbot_6"))
     await ultSongs.play_from_queue()

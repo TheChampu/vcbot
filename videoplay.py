@@ -38,6 +38,10 @@ async def video_c(event):
     if not (reply or song):
         return await xx.eor(get_string("vcbot_15"), time=5)
     await xx.eor(get_string("vcbot_20"))
+    ultSongs = Player(chat, xx, True)
+    was_connected = ultSongs.group_call.is_connected
+    if not was_connected and not (await ultSongs.vc_joiner(announce=False)):
+        return
     if reply and reply.media and mediainfo(reply.media).startswith("video"):
         song, thumb, title, link, duration = await file_download(xx, reply)
     else:
@@ -56,9 +60,6 @@ async def video_c(event):
                 song,
                 "♾",
             )
-    ultSongs = Player(chat, xx, True)
-    if not (await ultSongs.vc_joiner()):
-        return
     text = "🎸 **Now playing:** [{}]({})\n⏰ **Duration:** `{}`\n👥 **Chat:** `{}`\n🙋‍♂ **Requested by:** {}".format(
         title, link, duration, chat, from_user
     )

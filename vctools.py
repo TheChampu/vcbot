@@ -31,6 +31,8 @@ async def mute(event):
     else:
         chat = event.chat_id
     ultSongs = Player(chat)
+    if not ultSongs.group_call.is_connected:
+        return await event.eor(get_string("vcbot_6"))
     await ultSongs.group_call.set_is_mute(True)
     await event.eor(get_string("vcbot_12"))
 
@@ -46,6 +48,8 @@ async def unmute(event):
     else:
         chat = event.chat_id
     ultSongs = Player(chat)
+    if not ultSongs.group_call.is_connected:
+        return await event.eor(get_string("vcbot_6"))
     await ultSongs.group_call.set_is_mute(False)
     await event.eor("`UnMuted playback in this chat.`")
 
@@ -61,6 +65,8 @@ async def pauser(event):
     else:
         chat = event.chat_id
     ultSongs = Player(chat)
+    if not ultSongs.group_call.is_connected:
+        return await event.eor(get_string("vcbot_6"))
     await ultSongs.group_call.set_pause(True)
     await event.eor(get_string("vcbot_14"))
 
@@ -76,6 +82,8 @@ async def resumer(event):
     else:
         chat = event.chat_id
     ultSongs = Player(chat)
+    if not ultSongs.group_call.is_connected:
+        return await event.eor(get_string("vcbot_6"))
     await ultSongs.group_call.set_pause(False)
     await event.eor(get_string("vcbot_13"))
 
@@ -91,6 +99,8 @@ async def replayer(event):
     else:
         chat = event.chat_id
     ultSongs = Player(chat)
+    if not ultSongs.group_call.is_connected:
+        return await event.eor(get_string("vcbot_6"))
     ultSongs.group_call.restart_playout()
     await event.eor("`Re-playing the current song.`")
 

@@ -18,7 +18,14 @@ except ImportError:
     from pathlib import Path
 
     from pytgcalls import PyTgCalls
-    from pytgcalls.exceptions import NotInGroupCallError
+    try:
+        from pytgcalls.exceptions import NotInGroupCallError
+    except ImportError:
+        try:
+            from pytgcalls.exceptions import NotInCallError as NotInGroupCallError
+        except ImportError:
+            class NotInGroupCallError(Exception):
+                pass
     from pytgcalls.types.input_stream import AudioPiped, AudioVideoPiped
 
     class GroupCallFactory:
@@ -100,12 +107,17 @@ except ImportError:
         def _silence_file(self):
             silence_path = Path("resources/startup/vc_silence.wav")
             silence_path.parent.mkdir(parents=True, exist_ok=True)
-            if not silence_path.exists():
+            # Keep the fallback stream alive long enough for song downloads and
+            # first-play startup to finish before the placeholder track ends.
+            target_seconds = 180
+            target_frames = 48000 * target_seconds
+            target_size = 44 + (target_frames * 2)
+            if not silence_path.exists() or silence_path.stat().st_size < target_size:
                 with wave.open(str(silence_path), "wb") as wav_file:
                     wav_file.setnchannels(1)
                     wav_file.setsampwidth(2)
                     wav_file.setframerate(48000)
-                    wav_file.writeframes(b"\x00\x00" * 4800)
+                    wav_file.writeframes(b"\x00\x00" * target_frames)
             return str(silence_path)
 
         async def join(self, chat_id):
@@ -130,6 +142,9 @@ except ImportError:
                     await self._app.join_group_call(self._chat, self._current_stream)
                 else:
                     await self._app.change_stream(self._chat, self._current_stream)
+            except GroupCallNotFoundError:
+                # The active call state was lost; fall back to a direct join with the current stream.
+                await self._app.join_group_call(self._chat, self._current_stream)
             except NotInGroupCallError:
                 # Call exists but user is not joined yet; join directly with stream.
                 await self._app.join_group_call(self._chat, self._current_stream)
@@ -148,6 +163,8 @@ except ImportError:
                     await self._app.join_group_call(self._chat, self._current_stream)
                 else:
                     await self._app.change_stream(self._chat, self._current_stream)
+            except GroupCallNotFoundError:
+                await self._app.join_group_call(self._chat, self._current_stream)
             except NotInGroupCallError:
                 await self._app.join_group_call(self._chat, self._current_stream)
             if self._network_callback:
@@ -211,7 +228,7 @@ from telethon.errors.rpcerrorlist import (
     ChatSendMediaForbiddenError,
 )
 from telethon.errors.rpcbaseerrors import ForbiddenError
-from pyChampu import HNDLR, LOGS, asst, udB, vcClient
+from pyChampu import HNDLR, LOGS, asst, champu_bot, udB, vcClient
 from pyChampu._misc._decorators import compile_pattern
 from pyChampu.fns.helper import (
     bash,
@@ -228,6 +245,7 @@ from pyChampu._misc._assistant import in_pattern
 from pyChampu._misc._wrappers import eod, eor
 from pyChampu.version import __version__ as UltVer
 from telethon import events
+from telethon.errors.rpcerrorlist import UserNotParticipantError
 from telethon.tl import functions, types
 from telethon.utils import get_display_name
 
@@ -276,13 +294,11 @@ class Player:
         self._chat = chat
         self._current_chat = event.chat_id if event else LOG_CHANNEL
         self._video = video
+        self._voice_client = vcClient
         if CLIENTS.get(chat):
             self.group_call = CLIENTS[chat]
         else:
-            _client = GroupCallFactory(
-                vcClient, GroupCallFactory.MTPROTO_CLIENT_TYPE.TELETHON,
-            )
-            self.group_call = _client.get_group_call()
+            self.group_call = self._create_group_call(self._voice_client)
             CLIENTS.update({chat: self.group_call})
         # Guard against duplicate on_stream_end callbacks racing each other.
         if not hasattr(self.group_call, "_queue_lock"):
@@ -290,9 +306,39 @@ class Player:
         if not hasattr(self.group_call, "_ending_in_progress"):
             self.group_call._ending_in_progress = False
 
+    @staticmethod
+    def _create_group_call(client):
+        return GroupCallFactory(
+            client,
+            GroupCallFactory.MTPROTO_CLIENT_TYPE.TELETHON,
+        ).get_group_call()
+
+    async def _use_userbot_fallback_if_needed(self):
+        if self._voice_client is champu_bot:
+            return
+        if not champu_bot or getattr(champu_bot.me, "bot", True):
+            return
+        if not getattr(asst, "me", None) or not getattr(asst.me, "bot", True):
+            return
+        try:
+            await asst.get_permissions(self._chat, asst.me.id)
+            return
+        except UserNotParticipantError:
+            LOGS.info(
+                "Assistant bot is not in chat %s, falling back to userbot VC client.",
+                self._chat,
+            )
+        except Exception as er:
+            LOGS.debug(f"Assistant membership check failed for {self._chat}: {er}")
+            return
+
+        self._voice_client = champu_bot
+        self.group_call = self._create_group_call(champu_bot)
+        CLIENTS.update({self._chat: self.group_call})
+
     async def make_vc_active(self):
         try:
-            await vcClient(
+            await self._voice_client(
                 functions.phone.CreateGroupCallRequest(
                     self._chat, title="🎧 Music 🎶"
                 )
@@ -302,7 +348,8 @@ class Player:
             return False, e
         return True, None
 
-    async def startCall(self):
+    async def startCall(self, allow_create=False):
+        await self._use_userbot_fallback_if_needed()
         if VIDEO_ON:
             for chats in VIDEO_ON:
                 await VIDEO_ON[chats].stop()
@@ -321,11 +368,11 @@ class Player:
                 await self.group_call.join(self._chat)
             except GroupCallNotFoundError as er:
                 LOGS.info(er)
+                if not allow_create:
+                    return False, "Voice chat is off. Please turn it on first, then use play again."
                 dn, err = await self.make_vc_active()
                 if err:
                     return False, err
-                # Group call was created now; retry joining to avoid a later
-                # NotInGroupCallError when .play tries change_stream.
                 await asyncio.sleep(1.5)
                 try:
                     await self.group_call.join(self._chat)
@@ -412,6 +459,11 @@ class Player:
                 if not (await self.vc_joiner()):
                     return
                 await self.group_call.start_audio(song)
+            except GroupCallNotFoundError:
+                LOGS.info("GroupCallNotFoundError, attempting rejoin")
+                if not (await self.vc_joiner(announce=False)):
+                    return
+                await self.group_call.start_audio(song)
             except NotInGroupCallError:
                 LOGS.info("NotInGroupCallError, attempting rejoin")
                 if not (await self.vc_joiner()):
@@ -472,24 +524,37 @@ class Player:
                 parse_mode="html",
             )
 
-    async def vc_joiner(self):
+    async def vc_joiner(self, announce=True, allow_create=False):
         chat_id = self._chat
-        done, err = await self.startCall()
+        done, err = await self.startCall(allow_create=allow_create)
 
         if done:
-            await vcClient.send_message(
-                self._current_chat,
-                f"• Joined VC in <code>{chat_id}</code>",
-                parse_mode="html",
-            )
+            if announce:
+                await vcClient.send_message(
+                    self._current_chat,
+                    f"• Joined VC in <code>{chat_id}</code>",
+                    parse_mode="html",
+                )
 
             return True
+        if isinstance(err, str):
+            await vcClient.send_message(self._current_chat, err, parse_mode="html")
+            return False
         await vcClient.send_message(
             self._current_chat,
             f"<strong>ERROR while Joining Vc -</strong> <code>{chat_id}</code> :\n<code>{err}</code>",
             parse_mode="html",
         )
         return False
+
+
+async def ensure_vc(chat, event=None, video=False, announce=False):
+    player = Player(chat, event, video)
+    if player.group_call.is_connected:
+        return player
+    if not await player.vc_joiner(announce=announce):
+        return None
+    return player
 
 
 # --------------------------------------------------
@@ -503,19 +568,23 @@ def vc_asst(dec, **kwargs):
         handler = udB.get_key("VC_HNDLR") or HNDLR
         kwargs["pattern"] = compile_pattern(dec, handler)
         vc_auth = kwargs.get("vc_auth", True)
+        allow_all = kwargs.get("allow_all", True)
         key = udB.get_key("VC_AUTH_GROUPS") or {}
         if "vc_auth" in kwargs:
             del kwargs["vc_auth"]
+        if "allow_all" in kwargs:
+            del kwargs["allow_all"]
 
         async def vc_handler(e):
             VCAUTH = list(key.keys())
             if not (
-                (e.out)
+                allow_all
+                or (e.out)
                 or (e.sender_id in VC_AUTHS())
                 or (vc_auth and e.chat_id in VCAUTH)
             ):
                 return
-            elif vc_auth and key.get(e.chat_id):
+            elif not allow_all and vc_auth and key.get(e.chat_id):
                 cha, adm = key.get(e.chat_id), key[e.chat_id]["admins"]
                 if adm and not (await admin_check(e)):
                     return

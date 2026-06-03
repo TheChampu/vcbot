@@ -31,13 +31,14 @@ async def live_stream(e):
     if not is_url_ok(song):
         return await xx.eor("`Only Youtube Playlist please.`")
     await xx.edit(get_string("vcbot_7"))
+    ultSongs = Player(chat, e)
+    was_connected = ultSongs.group_call.is_connected
+    if not was_connected and not (await ultSongs.vc_joiner(announce=False)):
+        return
     file, thumb, title, link, duration = await dl_playlist(
         chat, inline_mention(e), song
     )
-    ultSongs = Player(chat, e)
-    if not ultSongs.group_call.is_connected:
-        if not (await ultSongs.vc_joiner()):
-            return
+    if not was_connected:
         from_user = inline_mention(e.sender)
         await xx.reply(
             "🎸 **Now playing:** [{}]({})\n⏰ **Duration:** `{}`\n👥 **Chat:** `{}`\n🙋‍♂ **Requested by:** {}".format(

@@ -16,7 +16,7 @@
 
 import re,os
 from telethon.tl import types
-from . import vc_asst, get_string, inline_mention, add_to_queue, mediainfo, file_download, LOGS, is_url_ok, bash, download, Player, VC_QUEUE
+from . import vc_asst, get_string, inline_mention, add_to_queue, mediainfo, file_download, LOGS, is_url_ok, bash, download, ensure_vc, Player, VC_QUEUE
 from telethon.errors.rpcerrorlist import ChatSendMediaForbiddenError, MessageIdInvalidError
 from telethon.errors.rpcbaseerrors import ForbiddenError
 
@@ -57,22 +57,23 @@ async def play_music_(event):
         return await xx.eor("Please specify a song name or reply to a audio file !", time=5
         )
     await xx.eor(get_string("vcbot_20"), parse_mode="md")
+    ultSongs = Player(chat, event)
+    was_connected = ultSongs.group_call.is_connected
+    if not was_connected and not (await ultSongs.vc_joiner(announce=False)):
+        return
     if reply and reply.media and mediainfo(reply.media).startswith(("audio", "video")):
         song, thumb, song_name, link, duration = await file_download(xx, reply)
     else:
         song, thumb, song_name, link, duration = await download(song)
         if len(link.strip().split()) > 1:
             link = link.strip().split()
-    ultSongs = Player(chat, event)
     song_name = f"{song_name[:30]}..."
-    if not ultSongs.group_call.is_connected:
-        if not (await ultSongs.vc_joiner()):
-            return
+    if isinstance(link, list):
+        for lin in link[1:]:
+            add_to_queue(chat, song, lin, lin, None, from_user, duration)
+        link = song_name = link[0]
+    if not was_connected:
         await ultSongs.group_call.start_audio(song)
-        if isinstance(link, list):
-            for lin in link[1:]:
-                add_to_queue(chat, song, lin, lin, None, from_user, duration)
-            link = song_name = link[0]
         text = "🎸 <strong>Now playing: <a href={}>{}</a>\n⏰ Duration:</strong> <code>{}</code>\n👥 <strong>Chat:</strong> <code>{}</code>\n🙋‍♂ <strong>Requested by: {}</strong>".format(
             link, song_name, duration, chat, from_user
         )
@@ -96,10 +97,6 @@ async def play_music_(event):
             and mediainfo(reply.media).startswith(("audio", "video"))
         ):
             song = None
-        if isinstance(link, list):
-            for lin in link[1:]:
-                add_to_queue(chat, song, lin, lin, None, from_user, duration)
-            link = song_name = link[0]
         add_to_queue(chat, song, song_name, link, thumb, from_user, duration)
         return await xx.eor(
             f"▶ Added 🎵 <a href={link}>{song_name}</a> to queue at #{list(VC_QUEUE[chat].keys())[-1]}.",
@@ -133,6 +130,9 @@ async def play_music_(event):
     await msg.eor("`• Started Playing from Channel....`")
     send_message = True
     ultSongs = Player(chat, event)
+    was_connected = ultSongs.group_call.is_connected
+    if not was_connected and not (await ultSongs.vc_joiner(announce=False)):
+        return
     count = 0
     async for song in event.client.iter_messages(
         fromchat, limit=limit, wait_time=5, filter=types.InputMessagesFilterMusic
@@ -142,9 +142,7 @@ async def play_music_(event):
             msg, song, fast_download=False
         )
         song_name = f"{song_name[:30]}..."
-        if not ultSongs.group_call.is_connected:
-            if not (await ultSongs.vc_joiner()):
-                return
+        if not was_connected:
             await ultSongs.group_call.start_audio(song)
             text = "🎸 <strong>Now playing: <a href={}>{}</a>\n⏰ Duration:</strong> <code>{}</code>\n👥 <strong>Chat:</strong> <code>{}</code>\n🙋‍♂ <strong>Requested by: {}</strong>".format(
                 link, song_name, duration, chat, from_user
@@ -189,7 +187,8 @@ async def radio_mirchi(e):
     if not is_url_ok(song):
         return await xx.eor(f"`{song}`\n\nNot a playable link.🥱")
     ultSongs = Player(chat, e)
-    if not ultSongs.group_call.is_connected and not (await ultSongs.vc_joiner()):
+    was_connected = ultSongs.group_call.is_connected
+    if not was_connected and not (await ultSongs.vc_joiner(announce=False)):
         return
     await ultSongs.group_call.start_audio(song)
     await xx.reply(
@@ -218,10 +217,11 @@ async def live_stream(e):
         is_live_vid = (await bash(f'youtube-dl -j "{song}" | jq ".is_live"'))[0]
     if is_live_vid != "true":
         return await xx.eor(f"Only Live Youtube Urls supported!\n{song}")
-    file, thumb, title, link, duration = await download(song)
     ultSongs = Player(chat, e)
-    if not ultSongs.group_call.is_connected and not (await ultSongs.vc_joiner()):
+    was_connected = ultSongs.group_call.is_connected
+    if not was_connected and not (await ultSongs.vc_joiner(announce=False)):
         return
+    file, thumb, title, link, duration = await download(song)
     from_user = inline_mention(e.sender)
     await xx.reply(
         "🎸 **Now playing:** [{}]({})\n⏰ **Duration:** `{}`\n👥 **Chat:** `{}`".format(
