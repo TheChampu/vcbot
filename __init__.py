@@ -26,7 +26,10 @@ except ImportError:
         except ImportError:
             class NotInGroupCallError(Exception):
                 pass
-    from pytgcalls.types.input_stream import AudioPiped, AudioVideoPiped
+    try:
+        from pytgcalls.types.input_stream import AudioPiped, AudioVideoPiped
+    except ImportError:
+        from pytgcalls.types import AudioPiped, AudioVideoPiped
 
     class GroupCallFactory:
         class MTPROTO_CLIENT_TYPE(Enum):
