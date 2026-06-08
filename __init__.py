@@ -73,6 +73,13 @@ class _CompatGroupCall:
     def is_connected(self):
         return self._chat is not None
 
+    def _ensure_valid_source(self, source):
+        if not source:
+            raise ValueError("Invalid stream source: None or empty")
+        if isinstance(source, MediaStream):
+            return source._media_path or source._audio_path or ""
+        return str(source)
+
     async def _ensure_started(self):
         if not self._started:
             await self._app.start()
