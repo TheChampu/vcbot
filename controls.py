@@ -21,16 +21,10 @@
 """
 
 try:
-    from pytgcalls.exceptions import NotConnectedError
+    from pytgcalls.exceptions import NotInCallError as NotConnectedError
 except ImportError:
-    try:
-        from pytgcalls.exceptions import NotInGroupCallError as NotConnectedError
-    except ImportError:
-        try:
-            from pytgcalls.exceptions import NotInCallError as NotConnectedError
-        except ImportError:
-            class NotConnectedError(Exception):
-                pass
+    class NotConnectedError(Exception):
+        pass
 
 from . import vc_asst, Player, get_string,CLIENTS,VIDEO_ON
 
