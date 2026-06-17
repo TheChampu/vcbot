@@ -35,7 +35,12 @@ class GroupCallFactory:
         TELETHON = "telethon"
 
     def __init__(self, client, client_type):
-        self._app = PyTgCalls(client)
+        client_id = id(client)
+        if client_id not in PYTGCALLS_CLIENTS:
+            app = PyTgCalls(client)
+            setup_pytgcalls_handlers(app)
+            PYTGCALLS_CLIENTS[client_id] = app
+        self._app = PYTGCALLS_CLIENTS[client_id]
 
     def get_group_call(self):
         return _CompatGroupCall(self._app)
@@ -51,19 +56,10 @@ class _CompatGroupCall:
         self._network_callback = None
         self._playout_callback = None
         self._started = False
-
-        # Wire stream-end and chat-state events once at construction time.
-        @self._app.on_update()
-        async def _on_update(client, update):
-            if isinstance(update, StreamEnded):
-                if self._playout_callback and self._chat == update.chat_id:
-                    await self._playout_callback(self, self._current_source, "audio")
-            elif isinstance(update, ChatUpdate):
-                left = bool(update.status & ChatUpdate.Status.LEFT_CALL)
-                if self._network_callback:
-                    await self._network_callback(self, not left)
-                if left and self._chat == update.chat_id:
-                    self._chat = None
+        self._current_track_start_time = 0
+        self._current_track_duration = 0
+        self._current_track_skipped = False
+        self._stream_retry_count = 0
 
     # ------------------------------------------------------------------ #
     # Public helpers                                                       #
@@ -94,6 +90,7 @@ class _CompatGroupCall:
     async def join(self, chat_id):
         await self._ensure_started()
         self._chat = chat_id
+        ACTIVE_GROUP_CALLS[chat_id] = self
         # Play a short silence to hold the VC slot while the real track is fetched.
         silence = MediaStream(
             "resources/startup/vc_silence.wav",
@@ -112,7 +109,7 @@ class _CompatGroupCall:
         self._current_source = source
         if self._chat is None:
             raise GroupCallNotFoundError()
-        stream = MediaStream(source, video_flags=MediaStream.Flags.IGNORE)
+        stream = create_media_stream(source, is_video=False)
         try:
             await self._app.play(self._chat, stream)
         except NoActiveGroupCall:
@@ -126,8 +123,9 @@ class _CompatGroupCall:
         self._current_source = source
         if self._chat is None:
             raise GroupCallNotFoundError()
+        stream = create_media_stream(source, is_video=True)
         try:
-            await self._app.play(self._chat, MediaStream(source))
+            await self._app.play(self._chat, stream)
         except NoActiveGroupCall:
             raise GroupCallNotFoundError()
         if self._network_callback:
@@ -143,6 +141,7 @@ class _CompatGroupCall:
         chat_id = self._chat
         self._chat = None
         self._current_source = None
+        ACTIVE_GROUP_CALLS.pop(chat_id, None)
         try:
             await self._app.leave_call(chat_id)
         except Exception:
@@ -169,7 +168,7 @@ class _CompatGroupCall:
             raise GroupCallNotFoundError()
         source = self._ensure_valid_source(source)
         self._current_source = source
-        stream = MediaStream(source, video_flags=MediaStream.Flags.IGNORE)
+        stream = create_media_stream(source, is_video=False)
         try:
             await self._app.play(self._chat, stream)
         except NoActiveGroupCall:
@@ -217,7 +216,7 @@ class _CompatGroupCall:
         try:
             source = self._current_source
             if source and self._chat:
-                stream = MediaStream(source, video_flags=MediaStream.Flags.IGNORE)
+                stream = create_media_stream(source, is_video=False)
                 await self._app.play(self._chat, stream)
         except Exception:
             pass
@@ -274,13 +273,193 @@ ACTIVE_CALLS, VC_QUEUE = [], {}
 MSGID_CACHE, VIDEO_ON = {}, {}
 CLIENTS = {}
 STREAM_CACHE = {}
-STREAM_CACHE_TTL = 900
+STREAM_CACHE_TTL = 3600
 LAST_WORKING_COOKIE_FILE = None
 API_URL = os.environ.get("SHRUTI_API_URL") or udB.get_key("YT_API_URL") or "https://api.shrutibots.site"
 API_KEY = os.environ.get("SHRUTI_API_KEY", "ShrutiBotsP3A8xKwYFafG6SuSLTIM")
-DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR", "downloads")
+DOWNLOAD_DIR = os.path.join(os.getcwd(), "downloads")
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-YT_COOKIES_DIR = "/home/ubuntu/ProjectRoot/resources/cookies"
+YT_COOKIES_DIR = os.path.join(os.getcwd(), "resources", "cookies")
+os.makedirs(YT_COOKIES_DIR, exist_ok=True)
+PYTGCALLS_CLIENTS = {}
+ACTIVE_GROUP_CALLS = {}
+
+def create_media_stream(source: str, is_video=False):
+    is_url = source.startswith("http://") or source.startswith("https://")
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    } if is_url else None
+    ffmpeg_params = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5" if is_url else None
+    
+    if is_video:
+        return MediaStream(
+            source,
+            headers=headers,
+            ffmpeg_parameters=ffmpeg_params
+        )
+    else:
+        return MediaStream(
+            source,
+            video_flags=MediaStream.Flags.IGNORE,
+            headers=headers,
+            ffmpeg_parameters=ffmpeg_params
+        )
+
+def setup_pytgcalls_handlers(app: PyTgCalls):
+    @app.on_update()
+    async def _global_on_update(client, update):
+        if isinstance(update, StreamEnded):
+            chat_id = update.chat_id
+            call = ACTIVE_GROUP_CALLS.get(chat_id)
+            if call and call._playout_callback:
+                await call._playout_callback(call, call._current_source, "audio")
+        elif isinstance(update, ChatUpdate):
+            chat_id = update.chat_id
+            left = bool(update.status & ChatUpdate.Status.LEFT_CALL)
+            call = ACTIVE_GROUP_CALLS.get(chat_id)
+            if call:
+                if call._network_callback:
+                    await call._network_callback(call, not left)
+                if left:
+                    call._chat = None
+                    ACTIVE_GROUP_CALLS.pop(chat_id, None)
+
+def duration_to_seconds(dur_str):
+    if not dur_str or dur_str == "Unknown" or dur_str == "♾":
+        return 0
+    parts = str(dur_str).split(":")
+    try:
+        if len(parts) == 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+        elif len(parts) == 2:
+            return int(parts[0]) * 60 + int(parts[1])
+        elif len(parts) == 1:
+            return int(parts[0])
+    except ValueError:
+        pass
+    return 0
+
+def save_queue_to_db():
+    try:
+        serializable_queue = {}
+        for chat_id, queue_data in VC_QUEUE.items():
+            serializable_queue[str(chat_id)] = {}
+            for pos, track in queue_data.items():
+                serializable_queue[str(chat_id)][str(pos)] = {
+                    "title": track.get("title", "Unknown"),
+                    "link": track.get("link", ""),
+                    "thumb": track.get("thumb"),
+                    "from_user": track.get("from_user", "Unknown"),
+                    "duration": track.get("duration", "Unknown")
+                }
+        udB.set_key("VC_PERSISTENT_QUEUE", serializable_queue)
+    except Exception as e:
+        LOGS.debug(f"Failed to save queue to DB: {e}")
+
+def load_queue_from_db():
+    try:
+        data = udB.get_key("VC_PERSISTENT_QUEUE")
+        if data and isinstance(data, dict):
+            for chat_id_str, queue_data in data.items():
+                chat_id = int(chat_id_str)
+                VC_QUEUE[chat_id] = {}
+                for pos_str, track in queue_data.items():
+                    pos = int(pos_str)
+                    VC_QUEUE[chat_id][pos] = {
+                        "song": None,
+                        "title": track.get("title", "Unknown"),
+                        "link": track.get("link", ""),
+                        "thumb": track.get("thumb"),
+                        "from_user": track.get("from_user", "Unknown"),
+                        "duration": track.get("duration", "Unknown")
+                    }
+            LOGS.info(f"Successfully restored queue for {len(VC_QUEUE)} chat(s) from DB.")
+    except Exception as e:
+        LOGS.debug(f"Failed to load queue from DB: {e}")
+
+def preload_next_in_queue(chat_id):
+    async def _preload():
+        try:
+            if not VC_QUEUE.get(chat_id):
+                return
+            keys = list(VC_QUEUE[chat_id].keys())
+            if not keys:
+                return
+            for pos in keys:
+                info = VC_QUEUE[chat_id][pos]
+                if not info.get("song") and info.get("link"):
+                    LOGS.info(f"Preloading stream link for track in queue: {info.get('title')}")
+                    stream_url = await get_stream_link(info["link"], prefer_audio=True)
+                    info["song"] = stream_url
+                    break
+        except Exception as e:
+            LOGS.debug(f"Queue preload error: {e}")
+    asyncio.create_task(_preload())
+
+async def send_now_playing_message(chat_id, current_chat_id, title, duration, from_user, link, thumb, pos=None):
+    pos_str = f" #{pos}" if pos else ""
+    caption = (
+        "━━━━━━━━━━━━━━\n"
+        f"🎵 <b>NOW STREAMING{pos_str}</b>\n"
+        "Powered by My Userbot\n\n"
+        f"<b>Title:</b> <a href=\"{link}\">{title}</a>\n"
+        f"<b>Requested By:</b> {from_user}\n"
+        f"<b>Duration:</b> {duration}\n\n"
+        "Streaming from My Userbot ✨\n"
+        "━━━━━━━━━━━━━━"
+    )
+    plain_text = (
+        "━━━━━━━━━━━━━━\n"
+        f"🎵 <b>NOW STREAMING{pos_str}</b>\n"
+        "Powered by My Userbot\n\n"
+        f"<b>Title:</b> {title}\n"
+        f"<b>Requested By:</b> {from_user}\n"
+        f"<b>Duration:</b> {duration}\n\n"
+        "Streaming from My Userbot ✨\n"
+        "━━━━━━━━━━━━━━"
+    )
+
+    if MSGID_CACHE.get(chat_id):
+        try:
+            await MSGID_CACHE[chat_id].delete()
+        except Exception:
+            pass
+        MSGID_CACHE.pop(chat_id, None)
+
+    msg = None
+    if thumb:
+        try:
+            msg = await vcClient.send_message(
+                current_chat_id,
+                caption,
+                file=thumb,
+                link_preview=False,
+                parse_mode="html"
+            )
+        except Exception as e:
+            LOGS.debug(f"Media send failed, falling back to text: {e}")
+            msg = None
+
+    if not msg:
+        try:
+            msg = await vcClient.send_message(
+                current_chat_id,
+                plain_text,
+                link_preview=False,
+                parse_mode="html"
+            )
+        except Exception as e:
+            LOGS.error(f"Failed to send now playing text message: {e}")
+
+    if msg:
+        MSGID_CACHE[chat_id] = msg
+
+    if thumb and os.path.exists(thumb):
+        try:
+            os.remove(thumb)
+        except Exception:
+            pass
+
 SEARCH_ENDPOINTS = (
     "song/search",
     "songs/search",
@@ -414,8 +593,35 @@ class Player:
                 )
                 return
 
+            # Check for broken stream auto-recovery
+            skipped = getattr(self.group_call, "_current_track_skipped", False)
+            start_time = getattr(self.group_call, "_current_track_start_time", 0)
+            duration = getattr(self.group_call, "_current_track_duration", 0)
+            
+            # Auto-recover / resume logic if stream died prematurely
+            if start_time > 0 and duration > 0 and not skipped:
+                elapsed = time() - start_time
+                if elapsed < duration - 15:
+                    retries = getattr(self.group_call, "_stream_retry_count", 0)
+                    if retries < 2:
+                        self.group_call._stream_retry_count = retries + 1
+                        LOGS.warning(f"Prematurely ended stream (elapsed {elapsed:.1f}s / duration {duration}s). Retrying...")
+                        try:
+                            await vcClient.send_message(
+                                self._current_chat,
+                                f"⚠️ <b>Stream connection lost.</b> Reconnecting and resuming playback... (Attempt {self.group_call._stream_retry_count}/2)",
+                                parse_mode="html"
+                            )
+                            await self.group_call.reconnect()
+                            return # Exit to avoid skipping to next track
+                        except Exception as rec_err:
+                            LOGS.error(f"Stream auto-recovery failed: {rec_err}")
+            
+            # Reset retry count if we reached the end normally or skipped
+            self.group_call._stream_retry_count = 0
+
             try:
-                if source and os.path.exists(source):
+                if source and os.path.exists(source) and not source.startswith("http"):
                     os.remove(source)
             except Exception as e:
                 LOGS.debug(f"Error removing temp file: {e}")
@@ -457,74 +663,74 @@ class Player:
             await self._notify_and_leave_after_queue_end()
             return
         
-        try:
-            song, title, link, thumb, from_user, pos, dur = await get_from_queue(
-                chat_id
-            )
-            try:
-                await self.group_call.start_audio(song)
-            except ParticipantJoinMissingError:
-                LOGS.info("ParticipantJoinMissingError, attempting rejoin")
-                if not (await self.vc_joiner()):
-                    return
-                await self.group_call.start_audio(song)
-            except GroupCallNotFoundError:
-                LOGS.info("GroupCallNotFoundError, attempting rejoin")
-                if not (await self.vc_joiner(announce=False)):
-                    return
-                await self.group_call.start_audio(song)
-            except NotInGroupCallError:
-                LOGS.info("NotInGroupCallError, attempting rejoin")
-                if not (await self.vc_joiner()):
-                    return
-                await self.group_call.start_audio(song)
+        while VC_QUEUE.get(chat_id) and VC_QUEUE[chat_id]:
+            keys = list(VC_QUEUE[chat_id].keys())
+            pos = keys[0]
+            info = VC_QUEUE[chat_id][pos]
+            title = info.get("title", "Unknown")
+            link = info.get("link", "")
+            thumb = info.get("thumb")
+            from_user = info.get("from_user", "Unknown")
+            dur = info.get("duration", "Unknown")
             
-            if MSGID_CACHE.get(chat_id):
+            try:
+                song = info.get("song")
+                if not song:
+                    song = await get_stream_link(link, prefer_audio=True)
+                    info["song"] = song
+                
                 try:
-                    await MSGID_CACHE[chat_id].delete()
+                    await self.group_call.start_audio(song)
+                except ParticipantJoinMissingError:
+                    LOGS.info("ParticipantJoinMissingError, attempting rejoin")
+                    if not (await self.vc_joiner()):
+                        return
+                    await self.group_call.start_audio(song)
+                except GroupCallNotFoundError:
+                    LOGS.info("GroupCallNotFoundError, attempting rejoin")
+                    if not (await self.vc_joiner(announce=False)):
+                        return
+                    await self.group_call.start_audio(song)
+                except NotInGroupCallError:
+                    LOGS.info("NotInGroupCallError, attempting rejoin")
+                    if not (await self.vc_joiner()):
+                        return
+                    await self.group_call.start_audio(song)
+
+                self.group_call._current_track_start_time = time()
+                self.group_call._current_track_duration = duration_to_seconds(dur)
+                self.group_call._current_track_skipped = False
+                
+                await send_now_playing_message(chat_id, self._current_chat, title, dur, from_user, link, thumb, pos)
+                
+                # Pop and save
+                VC_QUEUE[chat_id].pop(pos, None)
+                if not VC_QUEUE[chat_id]:
+                    VC_QUEUE.pop(chat_id, None)
+                
+                save_queue_to_db()
+                preload_next_in_queue(chat_id)
+                return
+                
+            except Exception as er:
+                LOGS.exception(f"Error playing song {title} ({link}): {er}")
+                VC_QUEUE[chat_id].pop(pos, None)
+                if not VC_QUEUE[chat_id]:
+                    VC_QUEUE.pop(chat_id, None)
+                save_queue_to_db()
+                try:
+                    await vcClient.send_message(
+                        self._current_chat,
+                        f"⚠️ <b>Error playing:</b> <a href=\"{link}\">{title}</a>\n"
+                        f"<code>{str(er)[:100]}</code>\n"
+                        f"<i>Skipping to the next track...</i>",
+                        parse_mode="html",
+                        link_preview=False
+                    )
                 except Exception:
                     pass
-                del MSGID_CACHE[chat_id]
-            
-            text = f"<strong>🎧 Now playing #{pos}: <a href={link}>{title}</a>\n⏰ Duration:</strong> <code>{dur}</code>\n👤 <strong>Requested by:</strong> {from_user}"
-            title_only_text = f"<strong>🎧 Now playing #{pos}:</strong> <code>{title}</code>"
-
-            try:
-                xx = await vcClient.send_message(
-                    self._current_chat,
-                    text,
-                    file=thumb,
-                    link_preview=False,
-                    parse_mode="html",
-                )
-
-            except (ChatSendMediaForbiddenError, ForbiddenError):
-                xx = await vcClient.send_message(
-                    self._current_chat,
-                    title_only_text,
-                    link_preview=False,
-                    parse_mode="html",
-                )
-            except Exception as msg_err:
-                LOGS.exception(f"Error sending now playing message: {msg_err}")
-                xx = None
-            
-            if xx:
-                MSGID_CACHE.update({chat_id: xx})
-            
-            # Remove now-playing song from queue only after start succeeds.
-            try:
-                VC_QUEUE[chat_id].pop(pos)
-                if not VC_QUEUE[chat_id]:
-                    VC_QUEUE.pop(chat_id)
-            except (KeyError, IndexError):
-                pass
-
-        except (IndexError, KeyError) as e:
-            # Queue is empty at this point; notify and leave VC.
-            LOGS.info(f"Queue empty in chat {chat_id}: {e}")
-            await self._notify_and_leave_after_queue_end()
-        except Exception as er:
+        
+        await self._notify_and_leave_after_queue_end()
             # For transient errors, keep VC connected and notify.
             LOGS.exception(f"Error playing next song: {er}")
             await vcClient.send_message(
@@ -1225,3 +1431,8 @@ async def file_download(event, reply, fast_download=True):
 
 
 # --------------------------------------------------
+
+try:
+    load_queue_from_db()
+except Exception as startup_err:
+    LOGS.error(f"Startup queue load failed: {startup_err}")

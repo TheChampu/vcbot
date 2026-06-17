@@ -10,7 +10,7 @@ import re
 from . import vc_asst, get_string, inline_mention, Player, dl_playlist, add_to_queue, is_url_ok, VC_QUEUE
 
 
-@vc_asst("ytplaylist")
+@vc_asst("ytplaylist(?: |$)")
 async def live_stream(e):
     xx = await e.eor(get_string("com_1"))
     chat = e.chat_id

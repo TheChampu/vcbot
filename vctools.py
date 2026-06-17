@@ -21,7 +21,7 @@ import os
 from time import time
 
 
-@vc_asst("mutevc")
+@vc_asst("mutevc(?: |$)")
 async def mute(event):
     if len(event.text.split()) > 1:
         chat = event.text.split()[1]
@@ -38,7 +38,7 @@ async def mute(event):
     await event.eor(get_string("vcbot_12"))
 
 
-@vc_asst("unmutevc")
+@vc_asst("unmutevc(?: |$)")
 async def unmute(event):
     if len(event.text.split()) > 1:
         chat = event.text.split()[1]
@@ -55,7 +55,7 @@ async def unmute(event):
     await event.eor("`UnMuted playback in this chat.`")
 
 
-@vc_asst("pausevc")
+@vc_asst("pausevc(?: |$)")
 async def pauser(event):
     if len(event.text.split()) > 1:
         chat = event.text.split()[1]
@@ -72,7 +72,7 @@ async def pauser(event):
     await event.eor(get_string("vcbot_14"))
 
 
-@vc_asst("resumevc")
+@vc_asst("resumevc(?: |$)")
 async def resumer(event):
     if len(event.text.split()) > 1:
         chat = event.text.split()[1]
@@ -89,7 +89,7 @@ async def resumer(event):
     await event.eor(get_string("vcbot_13"))
 
 
-@vc_asst("replay")
+@vc_asst("replay(?: |$)")
 async def replayer(event):
     if len(event.text.split()) > 1:
         chat = event.text.split()[1]
@@ -106,9 +106,43 @@ async def replayer(event):
     await event.eor("`Re-playing the current song.`")
 
 
-@vc_asst("checkcookies")
+@vc_asst("checkcookies(?: |$)")
 async def check_cookies(event):
-    """Report available cookie files, env/db cookie settings, and last-working cookie."""
+    """Report available cookie files, env/db cookie settings, and last-working cookie.
+    Or probe cookie files against a provided YouTube link to see which allow extraction.
+
+    Usage:
+    `.checkcookies` - report cookies info
+    `.checkcookies probe <youtube_url>` - probe cookies against url
+    """
+    parts = event.text.split(maxsplit=2)
+    if len(parts) >= 3 and parts[1].strip().lower() == "probe":
+        url = parts[2].strip()
+        msg = await event.eor("`Probing yt-dlp with available cookie modes...`")
+        results = []
+
+        modes = [None] + _ordered_cookie_files()
+        for cookie in modes:
+            label = "no-cookie" if not cookie else os.path.basename(cookie)
+            start = time()
+            try:
+                direct, err = await _extract_stream_with_ytdlp(url, cookie_file=cookie, prefer_audio=True)
+                took = round(time() - start, 2)
+                if direct:
+                    results.append(f"✅ {label} — OK ({took}s): {direct[:200]}")
+                    if cookie:
+                        global LAST_WORKING_COOKIE_FILE
+                        LAST_WORKING_COOKIE_FILE = cookie
+                    break
+                else:
+                    results.append(f"❌ {label} — failed ({took}s): {str(err)[:200]}")
+            except Exception as e:
+                took = round(time() - start, 2)
+                results.append(f"❌ {label} — exception ({took}s): {str(e)[:200]}")
+
+        return await msg.edit("\n".join(results))
+
+    # Standard checkcookies
     files = _ytdlp_cookie_files()
     env_vals = []
     for key in ("YTDLP_COOKIES_FILE", "YT_COOKIES_FILE", "YTDLP_COOKIES", "YT_COOKIES"):
@@ -137,39 +171,3 @@ async def check_cookies(event):
     lines.append("To enable cookies: place .txt/.json cookie files in the resources/cookies folder or set YTDLP_COOKIES_FILE env/db key.")
 
     await event.eor("\n".join(lines))
-
-
-@vc_asst("checkcookies probe")
-async def probe_cookies(event):
-    """Probe cookie files against a provided YouTube link to see which allow extraction.
-
-    Usage: `checkcookies probe <youtube_url>`
-    """
-    parts = event.text.split(maxsplit=2)
-    if len(parts) < 3:
-        return await event.eor("Usage: checkcookies probe <youtube_url>")
-    url = parts[2].strip()
-    msg = await event.eor("`Probing yt-dlp with available cookie modes...`")
-    results = []
-
-    modes = [None] + _ordered_cookie_files()
-    for cookie in modes:
-        label = "no-cookie" if not cookie else os.path.basename(cookie)
-        start = time()
-        try:
-            direct, err = await _extract_stream_with_ytdlp(url, cookie_file=cookie, prefer_audio=True)
-            took = round(time() - start, 2)
-            if direct:
-                results.append(f"✅ {label} — OK ({took}s): {direct[:200]}")
-                # remember successful cookie
-                if cookie:
-                    global LAST_WORKING_COOKIE_FILE
-                    LAST_WORKING_COOKIE_FILE = cookie
-                break
-            else:
-                results.append(f"❌ {label} — failed ({took}s): {str(err)[:200]}")
-        except Exception as e:
-            took = round(time() - start, 2)
-            results.append(f"❌ {label} — exception ({took}s): {str(e)[:200]}")
-
-    await msg.edit("\n".join(results))

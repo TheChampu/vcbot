@@ -12,7 +12,7 @@ from telethon.errors.rpcerrorlist import ChatSendMediaForbiddenError
 from . import vc_asst, Player, get_string, inline_mention, is_url_ok, mediainfo, vid_download, file_download,LOGS
 
 
-@vc_asst("videoplay")
+@vc_asst("videoplay(?: |$)")
 async def video_c(event):
     xx = await event.eor(get_string("com_1"))
     chat = event.chat_id

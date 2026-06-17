@@ -16,12 +16,12 @@
 
 import re,os,asyncio
 from telethon.tl import types
-from . import vc_asst, get_string, inline_mention, add_to_queue, mediainfo, file_download, LOGS, is_url_ok, bash, download, ensure_vc, Player, VC_QUEUE
+from . import vc_asst, get_string, inline_mention, add_to_queue, mediainfo, file_download, LOGS, is_url_ok, bash, download, ensure_vc, Player, VC_QUEUE, send_now_playing_message, save_queue_to_db
 from telethon.errors.rpcerrorlist import ChatSendMediaForbiddenError, MessageIdInvalidError
 from telethon.errors.rpcbaseerrors import ForbiddenError
 
 
-@vc_asst("play")
+@vc_asst("play(?: |$)")
 async def play_music_(event):
     if "playfrom" in event.text.split()[0]:
         return  # For PlayFrom Conflict
@@ -74,22 +74,9 @@ async def play_music_(event):
         link = song_name = link[0]
     if not was_connected:
         await ultSongs.group_call.start_audio(song)
-        text = "🎸 <strong>Now playing: <a href={}>{}</a>\n⏰ Duration:</strong> <code>{}</code>\n👥 <strong>Chat:</strong> <code>{}</code>\n🙋‍♂ <strong>Requested by: {}</strong>".format(
-            link, song_name, duration, chat, from_user
-        )
-        title_only_text = f"🎸 <strong>Now playing:</strong> <code>{song_name}</code>"
-        try:
-            await xx.reply(
-                text,
-                file=thumb,
-                link_preview=False,
-                parse_mode="html",
-            )
-            await xx.delete()
-        except (ChatSendMediaForbiddenError, ForbiddenError):
-            await xx.eor(title_only_text, link_preview=False, parse_mode="html")
-        if thumb and os.path.exists(thumb):
-            os.remove(thumb)
+        # Unified message
+        await send_now_playing_message(chat, event.chat_id, song_name, duration, from_user, link, thumb, pos=1)
+        await xx.delete()
     else:
         if not (
             reply
@@ -98,6 +85,7 @@ async def play_music_(event):
         ):
             song = None
         add_to_queue(chat, song, song_name, link, thumb, from_user, duration)
+        save_queue_to_db()
         return await xx.eor(
             f"▶ Added 🎵 <a href={link}>{song_name}</a> to queue at #{list(VC_QUEUE[chat].keys())[-1]}.",
             parse_mode="html",
@@ -105,6 +93,18 @@ async def play_music_(event):
 
 
 @vc_asst("playfrom")
+async def play_music_(event):
+    msg = await event.eor(get_string("com_1"))
+    chat = event.chat_id
+    limit = 10
+    from_user = inline_mention(await event.get_sender(), html=True)
+    if len(event.text.split()) <= 1:
+        return await msg.edit(
+            "Use in Proper Format\n`.playfrom <channel username> ; <limit>`"
+        )
+    input_str = event.text.split(maxsplit=1)[1]
+    if ";" in input_str:
+@vc_asst("playfrom(?: |$)")
 async def play_music_(event):
     msg = await event.eor(get_string("com_1"))
     chat = event.chat_id
@@ -151,23 +151,10 @@ async def play_music_(event):
         song_name = f"{song_name[:30]}..."
         if not was_connected:
             await ultSongs.group_call.start_audio(song)
-            text = "🎸 <strong>Now playing: <a href={}>{}</a>\n⏰ Duration:</strong> <code>{}</code>\n👥 <strong>Chat:</strong> <code>{}</code>\n🙋‍♂ <strong>Requested by: {}</strong>".format(
-                link, song_name, duration, chat, from_user
-            )
-            title_only_text = f"🎸 <strong>Now playing:</strong> <code>{song_name}</code>"
-            try:
-                await msg.reply(
-                    text,
-                    file=thumb,
-                    link_preview=False,
-                    parse_mode="html",
-                )
-            except (ChatSendMediaForbiddenError, ForbiddenError):
-                await msg.reply(title_only_text, link_preview=False, parse_mode="html")
-            if thumb and os.path.exists(thumb):
-                os.remove(thumb)
+            await send_now_playing_message(chat, event.chat_id, song_name, duration, from_user, link, thumb, pos=1)
         else:
             add_to_queue(chat, song, song_name, link, thumb, from_user, duration)
+            save_queue_to_db()
             if send_message and count == 1:
                 await msg.eor(
                     f"▶ Added 🎵 <strong><a href={link}>{song_name}</a></strong> to queue at <strong>#{list(VC_QUEUE[chat].keys())[-1]}.</strong>",
@@ -176,7 +163,7 @@ async def play_music_(event):
                 send_message = False
 
 
-@vc_asst("radio")
+@vc_asst("radio(?: |$)")
 async def radio_mirchi(e):
     xx = await e.eor(get_string("com_1"))
     if len(e.text.split()) <= 1:
@@ -205,7 +192,7 @@ async def radio_mirchi(e):
     await xx.delete()
 
 
-@vc_asst("(live|ytlive)")
+@vc_asst("(live|ytlive)(?: |$)")
 async def live_stream(e):
     xx = await e.eor(get_string("com_1"))
     if len(e.text.split()) <= 1:
@@ -244,12 +231,6 @@ async def live_stream(e):
         return
     file, thumb, title, link, duration = await download(song)
     from_user = inline_mention(e.sender)
-    await xx.reply(
-        "🎸 **Now playing:** [{}]({})\n⏰ **Duration:** `{}`\n👥 **Chat:** `{}`".format(
-            title, link, duration, chat, from_user
-        ),
-        file=thumb,
-        link_preview=False,
-    )
+    await send_now_playing_message(chat, e.chat_id, title, duration, from_user, link, thumb, pos=1)
     await xx.delete()
     await ultSongs.group_call.start_audio(file)
