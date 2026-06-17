@@ -650,94 +650,99 @@ class Player:
             self.group_call._ending_in_progress = False
 
     async def play_from_queue(self):
-        chat_id = self._chat
-        if chat_id in VIDEO_ON:
-            try:
-                await self.group_call.stop_video()
-                VIDEO_ON.pop(chat_id)
-            except Exception as e:
-                LOGS.debug(f"Error stopping video: {e}")
-        
-        # Queue finished: notify and leave VC cleanly.
-        if not VC_QUEUE.get(chat_id) or not VC_QUEUE[chat_id]:
-            await self._notify_and_leave_after_queue_end()
-            return
-        
-        while VC_QUEUE.get(chat_id) and VC_QUEUE[chat_id]:
-            keys = list(VC_QUEUE[chat_id].keys())
-            pos = keys[0]
-            info = VC_QUEUE[chat_id][pos]
-            title = info.get("title", "Unknown")
-            link = info.get("link", "")
-            thumb = info.get("thumb")
-            from_user = info.get("from_user", "Unknown")
-            dur = info.get("duration", "Unknown")
+        try:
+            chat_id = self._chat
+            if chat_id in VIDEO_ON:
+                try:
+                    await self.group_call.stop_video()
+                    VIDEO_ON.pop(chat_id)
+                except Exception as e:
+                    LOGS.debug(f"Error stopping video: {e}")
             
-            try:
-                song = info.get("song")
-                if not song:
-                    song = await get_stream_link(link, prefer_audio=True)
-                    info["song"] = song
-                
-                try:
-                    await self.group_call.start_audio(song)
-                except ParticipantJoinMissingError:
-                    LOGS.info("ParticipantJoinMissingError, attempting rejoin")
-                    if not (await self.vc_joiner()):
-                        return
-                    await self.group_call.start_audio(song)
-                except GroupCallNotFoundError:
-                    LOGS.info("GroupCallNotFoundError, attempting rejoin")
-                    if not (await self.vc_joiner(announce=False)):
-                        return
-                    await self.group_call.start_audio(song)
-                except NotInGroupCallError:
-                    LOGS.info("NotInGroupCallError, attempting rejoin")
-                    if not (await self.vc_joiner()):
-                        return
-                    await self.group_call.start_audio(song)
-
-                self.group_call._current_track_start_time = time()
-                self.group_call._current_track_duration = duration_to_seconds(dur)
-                self.group_call._current_track_skipped = False
-                
-                await send_now_playing_message(chat_id, self._current_chat, title, dur, from_user, link, thumb, pos)
-                
-                # Pop and save
-                VC_QUEUE[chat_id].pop(pos, None)
-                if not VC_QUEUE[chat_id]:
-                    VC_QUEUE.pop(chat_id, None)
-                
-                save_queue_to_db()
-                preload_next_in_queue(chat_id)
+            # Queue finished: notify and leave VC cleanly.
+            if not VC_QUEUE.get(chat_id) or not VC_QUEUE[chat_id]:
+                await self._notify_and_leave_after_queue_end()
                 return
+            
+            while VC_QUEUE.get(chat_id) and VC_QUEUE[chat_id]:
+                keys = list(VC_QUEUE[chat_id].keys())
+                pos = keys[0]
+                info = VC_QUEUE[chat_id][pos]
+                title = info.get("title", "Unknown")
+                link = info.get("link", "")
+                thumb = info.get("thumb")
+                from_user = info.get("from_user", "Unknown")
+                dur = info.get("duration", "Unknown")
                 
-            except Exception as er:
-                LOGS.exception(f"Error playing song {title} ({link}): {er}")
-                VC_QUEUE[chat_id].pop(pos, None)
-                if not VC_QUEUE[chat_id]:
-                    VC_QUEUE.pop(chat_id, None)
-                save_queue_to_db()
                 try:
-                    await vcClient.send_message(
-                        self._current_chat,
-                        f"⚠️ <b>Error playing:</b> <a href=\"{link}\">{title}</a>\n"
-                        f"<code>{str(er)[:100]}</code>\n"
-                        f"<i>Skipping to the next track...</i>",
-                        parse_mode="html",
-                        link_preview=False
-                    )
-                except Exception:
-                    pass
-        
-        await self._notify_and_leave_after_queue_end()
+                    song = info.get("song")
+                    if not song:
+                        song = await get_stream_link(link, prefer_audio=True)
+                        info["song"] = song
+                    
+                    try:
+                        await self.group_call.start_audio(song)
+                    except ParticipantJoinMissingError:
+                        LOGS.info("ParticipantJoinMissingError, attempting rejoin")
+                        if not (await self.vc_joiner()):
+                            return
+                        await self.group_call.start_audio(song)
+                    except GroupCallNotFoundError:
+                        LOGS.info("GroupCallNotFoundError, attempting rejoin")
+                        if not (await self.vc_joiner(announce=False)):
+                            return
+                        await self.group_call.start_audio(song)
+                    except NotInGroupCallError:
+                        LOGS.info("NotInGroupCallError, attempting rejoin")
+                        if not (await self.vc_joiner()):
+                            return
+                        await self.group_call.start_audio(song)
+
+                    self.group_call._current_track_start_time = time()
+                    self.group_call._current_track_duration = duration_to_seconds(dur)
+                    self.group_call._current_track_skipped = False
+                    
+                    await send_now_playing_message(chat_id, self._current_chat, title, dur, from_user, link, thumb, pos)
+                    
+                    # Pop and save
+                    VC_QUEUE[chat_id].pop(pos, None)
+                    if not VC_QUEUE[chat_id]:
+                        VC_QUEUE.pop(chat_id, None)
+                    
+                    save_queue_to_db()
+                    preload_next_in_queue(chat_id)
+                    return
+                    
+                except Exception as er:
+                    LOGS.exception(f"Error playing song {title} ({link}): {er}")
+                    VC_QUEUE[chat_id].pop(pos, None)
+                    if not VC_QUEUE[chat_id]:
+                        VC_QUEUE.pop(chat_id, None)
+                    save_queue_to_db()
+                    try:
+                        await vcClient.send_message(
+                            self._current_chat,
+                            f"⚠️ <b>Error playing:</b> <a href=\"{link}\">{title}</a>\n"
+                            f"<code>{str(er)[:100]}</code>\n"
+                            f"<i>Skipping to the next track...</i>",
+                            parse_mode="html",
+                            link_preview=False
+                        )
+                    except Exception:
+                        pass
+            
+            await self._notify_and_leave_after_queue_end()
+        except Exception as er:
             # For transient errors, keep VC connected and notify.
             LOGS.exception(f"Error playing next song: {er}")
-            await vcClient.send_message(
-                self._current_chat,
-                f"⚠️ <strong>Error playing next song:</strong> <code>{str(er)[:100]}</code>",
-                parse_mode="html",
-            )
+            try:
+                await vcClient.send_message(
+                    self._current_chat,
+                    f"⚠️ <strong>Error playing next song:</strong> <code>{str(er)[:100]}</code>",
+                    parse_mode="html",
+                )
+            except Exception:
+                pass
 
     async def vc_joiner(self, announce=True, allow_create=False):
         chat_id = self._chat
