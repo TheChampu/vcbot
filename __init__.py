@@ -912,27 +912,46 @@ async def download(query):
         title = link = query
     else:
         data = None
+        link = None
+
+        # ── Step 1: Try API search first (fastest, no bot-check) ──────────────
+        try:
+            api_link = await _api_search_youtube_link(query)
+            if api_link:
+                link = api_link
+        except Exception as ex:
+            LOGS.debug("API search failed for query '%s': %s", query, str(ex)[:180])
+
+        # ── Step 2: VideosSearch for rich metadata ─────────────────────────────
         if VideosSearch:
             try:
                 search = VideosSearch(query, limit=1).result()
                 data = search["result"][0]
+                # If API gave us link but VideosSearch has better metadata, use data
+                if not link:
+                    link = data["link"]
             except Exception as ex:
-                LOGS.warning("VideosSearch failed, using fallback for query '%s': %s", query, str(ex)[:180])
+                LOGS.warning("VideosSearch failed for query '%s': %s", query, str(ex)[:180])
 
         if data:
-            link = data["link"]
+            link = data.get("link") or link
             title = data["title"]
             duration = data.get("duration") or "♾"
             thumb = f"https://i.ytimg.com/vi/{data['id']}/hqdefault.jpg"
+        elif link:
+            # API found the link but no rich metadata
+            title = query
+            duration = "Unknown"
+            thumb = None
         else:
-            link = await _api_search_youtube_link(query)
-            if not link:
-                link = get_yt_link(query)
+            # ── Step 3: Last resort fallback ───────────────────────────────────
+            link = get_yt_link(query)
             if not link:
                 raise ValueError("No playable YouTube result found")
             title = link
             duration = "Unknown"
             thumb = None
+
     dl = await get_stream_link(link, prefer_audio=True)
     return dl, thumb, title, link, duration
 
@@ -958,10 +977,17 @@ async def get_stream_link(ytlink, prefer_audio=True):
     if cached:
         return cached
 
-    # Priority: yt-dlp (no cookies) -> yt-dlp (all cookie files) -> API_URL.
-    cookie_files = [None] + _ordered_cookie_files()
     last_error = ""
+
+    # ── Priority 1: Shruti API (fastest, no bot-check issues) ─────────────────
+    api_stream = await _api_resolve_stream_url(ytlink, prefer_audio=prefer_audio)
+    if api_stream:
+        _stream_cache_set(ytlink, prefer_audio, api_stream)
+        return api_stream
+
+    # ── Priority 2: yt-dlp with cookies, then without ─────────────────────────
     selector = "bestaudio/best" if prefer_audio else "best[height<=?720][width<=?1280]/best"
+    cookie_files = _ordered_cookie_files() + [None]  # cookies first, no-cookie last
 
     for cookie_file in cookie_files:
         direct, api_error = await _extract_stream_with_ytdlp(
@@ -1005,15 +1031,10 @@ async def get_stream_link(ytlink, prefer_audio=True):
         if err:
             last_error = str(err)
 
-    api_stream = await _api_resolve_stream_url(ytlink, prefer_audio=prefer_audio)
-    if api_stream:
-        _stream_cache_set(ytlink, prefer_audio, api_stream)
-        return api_stream
-
     if _is_youtube_bot_challenge(last_error):
         raise ValueError(
-            "YouTube blocked playback. yt-dlp and cookies both failed. "
-            "Put valid cookies .txt/.json files in /home/ubuntu/ProjectRoot/resources/cookies"
+            "YouTube blocked playback (bot check). API also failed. "
+            "Put valid cookies .txt/.json files in resources/cookies"
         )
     raise ValueError("Could not resolve a playable stream URL")
 
