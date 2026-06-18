@@ -777,7 +777,7 @@ async def ensure_vc(chat, event=None, video=False, announce=False):
     return player
 
 
-# --------------------------------------------------
+PROCESSED_VC_COMMANDS = {}
 
 
 def vc_asst(dec, **kwargs):
@@ -796,6 +796,14 @@ def vc_asst(dec, **kwargs):
             del kwargs["allow_all"]
 
         async def vc_handler(e):
+            # Prevent duplicate processing of the same message by multiple clients
+            msg_key = (e.chat_id, e.id)
+            now = time()
+            if msg_key in PROCESSED_VC_COMMANDS:
+                if now - PROCESSED_VC_COMMANDS[msg_key] < 5:
+                    return
+            PROCESSED_VC_COMMANDS[msg_key] = now
+
             VCAUTH = list(key.keys())
             if not (
                 allow_all
@@ -825,11 +833,20 @@ def vc_asst(dec, **kwargs):
                     parse_mode="html",
                 )
 
-
         vcClient.add_event_handler(
             vc_handler,
             events.NewMessage(**kwargs),
         )
+        if champu_bot and champu_bot is not vcClient:
+            champu_bot.add_event_handler(
+                vc_handler,
+                events.NewMessage(**kwargs),
+            )
+        if asst and asst is not vcClient and asst is not champu_bot:
+            asst.add_event_handler(
+                vc_handler,
+                events.NewMessage(**kwargs),
+            )
 
     return ult
 
