@@ -398,25 +398,26 @@ def preload_next_in_queue(chat_id):
 
 async def send_now_playing_message(chat_id, current_chat_id, title, duration, from_user, link, thumb, pos=None):
     pos_str = f" #{pos}" if pos else ""
+    
     caption = (
-        "━━━━━━━━━━━━━━\n"
-        f"🎵 <b>NOW STREAMING{pos_str}</b>\n"
-        "Powered by My Userbot\n\n"
-        f"<b>Title:</b> <a href=\"{link}\">{title}</a>\n"
-        f"<b>Requested By:</b> {from_user}\n"
-        f"<b>Duration:</b> {duration}\n\n"
-        "Streaming from My Userbot ✨\n"
-        "━━━━━━━━━━━━━━"
+        "<b>\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500</b>\n"
+        f"\U0001f3b5 <b>NOW PLAYING{pos_str}</b>\n"
+        "<b>\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500</b>\n\n"
+        f"\U0001f3a7 <b>Title:</b> <a href=\"{link}\">{title}</a>\n"
+        f"\u23f1 <b>Duration:</b> {duration}\n"
+        f"\U0001f464 <b>Requested By:</b> {from_user}\n\n"
+        "<i>\u2728 Streaming via My Userbot</i>\n"
+        "<b>\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500</b>"
     )
-    plain_text = (
-        "━━━━━━━━━━━━━━\n"
-        f"🎵 <b>NOW STREAMING{pos_str}</b>\n"
-        "Powered by My Userbot\n\n"
-        f"<b>Title:</b> {title}\n"
-        f"<b>Requested By:</b> {from_user}\n"
-        f"<b>Duration:</b> {duration}\n\n"
-        "Streaming from My Userbot ✨\n"
-        "━━━━━━━━━━━━━━"
+    plain_caption = (
+        "<b>\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500</b>\n"
+        f"\U0001f3b5 <b>NOW PLAYING{pos_str}</b>\n"
+        "<b>\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500</b>\n\n"
+        f"\U0001f3a7 <b>Title:</b> {title}\n"
+        f"\u23f1 <b>Duration:</b> {duration}\n"
+        f"\U0001f464 <b>Requested By:</b> {from_user}\n\n"
+        "<i>\u2728 Streaming via My Userbot</i>\n"
+        "<b>\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500</b>"
     )
 
     if MSGID_CACHE.get(chat_id):
@@ -444,7 +445,7 @@ async def send_now_playing_message(chat_id, current_chat_id, title, duration, fr
         try:
             msg = await vcClient.send_message(
                 current_chat_id,
-                plain_text,
+                plain_caption,
                 link_preview=False,
                 parse_mode="html"
             )
@@ -557,7 +558,7 @@ class Player:
             except GroupCallNotFoundError as er:
                 LOGS.info(er)
                 if not allow_create:
-                    return False, "Voice chat is off. Please turn it on first, then use play again."
+                    return False, "🔴 <b>VC Off Hai!</b>\n\nIs group mein Voice Chat abhi active nahi hai. Pehle VC enable karo, phir play karo."
                 dn, err = await self.make_vc_active()
                 if err:
                     return False, err
@@ -638,7 +639,7 @@ class Player:
         try:
             await vcClient.send_message(
                 self._current_chat,
-                "🎵 <strong>Song was finished.</strong> If you want to play more songs, give me commands.",
+                "\U0001f3b5 <b>Queue khatam ho gaya!</b>\n\nAb koi song nahi hai. Play karne ke liye <code>play &lt;song name&gt;</code> use karo.",
                 parse_mode="html",
             )
             # Give Telegram a moment to deliver the message before leaving VC.
@@ -752,7 +753,7 @@ class Player:
             if announce:
                 await vcClient.send_message(
                     self._current_chat,
-                    f"• Joined VC in <code>{chat_id}</code>",
+                    f"\u2705 <b>VC Join Ho Gaya!</b>\n\n⚡ Ab song play karne ke liye <code>play &lt;song name&gt;</code> use karo.",
                     parse_mode="html",
                 )
 
@@ -762,7 +763,7 @@ class Player:
             return False
         await vcClient.send_message(
             self._current_chat,
-            f"<strong>ERROR while Joining Vc -</strong> <code>{chat_id}</code> :\n<code>{err}</code>",
+            f"\u274c <b>VC Join mein error aaya:</b>\n<code>{err}</code>",
             parse_mode="html",
         )
         return False
@@ -788,7 +789,7 @@ def vc_asst(dec, **kwargs):
         handler = udB.get_key("VC_HNDLR") or HNDLR
         kwargs["pattern"] = compile_pattern(dec, handler)
         vc_auth = kwargs.get("vc_auth", True)
-        allow_all = kwargs.get("allow_all", True)
+        allow_all = kwargs.get("allow_all", False)  # Default: sirf owner+sudos+vc_sudos
         key = udB.get_key("VC_AUTH_GROUPS") or {}
         if "vc_auth" in kwargs:
             del kwargs["vc_auth"]
@@ -1428,6 +1429,25 @@ async def dl_playlist(chat, from_user, link):
                 LOGS.exception(er)
 
 
+def _build_message_link(reply):
+    """Safely build a t.me message link from a Telethon Message object.
+    Falls back to an empty string if the chat ID cannot be resolved
+    (e.g. a forwarded message from a channel the bot hasn't joined).
+    """
+    try:
+        chat_id = reply.chat_id
+        msg_id = reply.id
+        if chat_id and msg_id:
+            # Supergroups / channels have a negative ID starting with -100
+            if str(chat_id).startswith("-100"):
+                peer = str(chat_id)[4:]  # strip -100 prefix
+                return f"https://t.me/c/{peer}/{msg_id}"
+            # For regular groups we can't build a public link, return empty
+        return ""
+    except Exception:
+        return ""
+
+
 async def file_download(event, reply, fast_download=True):
     thumb = "https://telegra.ph/file/abc578ecc222d28a861ba.mp4"
     title = reply.file.title or reply.file.name or f"{str(time())}.mp4"
@@ -1440,16 +1460,21 @@ async def file_download(event, reply, fast_download=True):
             time(),
             f"Downloading {title}...",
         )
-
         dl = dl.name
     else:
         dl = await reply.download_media(os.path.join(DOWNLOAD_DIR, ""))
     duration = (
         time_formatter(reply.file.duration * 1000) if reply.file.duration else "🤷‍♂️"
     )
-    if reply.document.thumbs:
-        thumb = await reply.download_media(os.path.join(DOWNLOAD_DIR, ""), thumb=-1)
-    return dl, thumb, title, reply.message_link, duration
+    # Safely download thumbnail — skip if the message is from an external
+    # channel/group the bot cannot resolve (PeerChannel lookup error).
+    if reply.document and reply.document.thumbs:
+        try:
+            thumb = await reply.download_media(os.path.join(DOWNLOAD_DIR, ""), thumb=-1)
+        except Exception as e:
+            LOGS.debug(f"Thumb download skipped (could not resolve entity): {e}")
+    link = _build_message_link(reply)
+    return dl, thumb, title, link, duration
 
 
 # --------------------------------------------------
