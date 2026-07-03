@@ -10,50 +10,47 @@ from urllib.parse import quote_plus
 import aiohttp
 
 try:
-    from pytgcalls import GroupCallFactory
+    from pytgcalls.types import MediaStream, ChatUpdate, StreamEnded
+    from pytgcalls.exceptions import NoActiveGroupCall
+    IS_V2 = True
+    GroupCallNotFoundError = NoActiveGroupCall
+except ImportError:
+    from pytgcalls.types.input_stream import AudioPiped, AudioVideoPiped
     from pytgcalls.exceptions import GroupCallNotFoundError
     NotInGroupCallError = GroupCallNotFoundError
-    MediaStream = ChatUpdate = StreamEnded = None
-except ImportError:
-    from pytgcalls import PyTgCalls
-    from pytgcalls.types import MediaStream, ChatUpdate, StreamEnded
-    from pytgcalls.exceptions import (
-        NoActiveGroupCall,
-        NotInCallError as NotInGroupCallError,
-    )
-
-    # Compat aliases so the rest of the code can still raise/catch these names
-    GroupCallNotFoundError = NoActiveGroupCall
+    IS_V2 = False
 
 
+if IS_V2:
     def AudioPiped(path):
         """Audio-only stream (video suppressed)."""
         return MediaStream(path, video_flags=MediaStream.Flags.IGNORE)
-
 
     def AudioVideoPiped(path, with_audio=True):
         """Combined audio+video stream."""
         return MediaStream(path)
 
 
-    class GroupCallFactory:
-        class MTPROTO_CLIENT_TYPE(Enum):
-            TELETHON = "telethon"
+class GroupCallFactory:
+    class MTPROTO_CLIENT_TYPE(Enum):
+        TELETHON = "telethon"
 
-        def __init__(self, client, client_type):
-            client_id = id(client)
-            if client_id not in PYTGCALLS_CLIENTS:
-                app = PyTgCalls(client)
+    def __init__(self, client, client_type):
+        client_id = id(client)
+        if client_id not in PYTGCALLS_CLIENTS:
+            from pytgcalls import PyTgCalls
+            app = PyTgCalls(client)
+            if IS_V2:
                 setup_pytgcalls_handlers(app)
-                PYTGCALLS_CLIENTS[client_id] = app
-            self._app = PYTGCALLS_CLIENTS[client_id]
+            PYTGCALLS_CLIENTS[client_id] = app
+        self._app = PYTGCALLS_CLIENTS[client_id]
 
-        def get_group_call(self):
-            return _CompatGroupCall(self._app)
+    def get_group_call(self):
+        return _CompatGroupCall(self._app)
 
 
 class _CompatGroupCall:
-    """Adapter between the old group-call API used by vcbot and pytgcalls v2.x."""
+    """Adapter between the old group-call API used by vcbot and pytgcalls v1.x/v2.x."""
 
     def __init__(self, app):
         self._app = app
@@ -62,23 +59,23 @@ class _CompatGroupCall:
         self._network_callback = None
         self._playout_callback = None
         self._started = False
+        self._stream_end_hooked = False
         self._current_track_start_time = 0
         self._current_track_duration = 0
         self._current_track_skipped = False
         self._stream_retry_count = 0
 
-    # ------------------------------------------------------------------ #
-    # Public helpers                                                       #
-    # ------------------------------------------------------------------ #
-
     @property
     def is_connected(self):
-        return self._chat is not None
+        if IS_V2:
+            return self._chat is not None
+        else:
+            return bool(self._chat) and self._app.is_connected
 
     def _ensure_valid_source(self, source):
         if not source:
             raise ValueError("Invalid stream source: None or empty")
-        if isinstance(source, MediaStream):
+        if IS_V2 and isinstance(source, MediaStream):
             return source._media_path or source._audio_path or ""
         return str(source)
 
@@ -89,23 +86,46 @@ class _CompatGroupCall:
 
     def on_network_status_changed(self, callback):
         self._network_callback = callback
+        if not IS_V2:
+            try:
+                @self._app.on_network_status_changed()
+                async def _net_handler(client, is_connected):
+                    if self._network_callback:
+                        await self._network_callback(self, is_connected)
+            except Exception:
+                pass
 
     def on_playout_ended(self, callback):
         self._playout_callback = callback
+        if not IS_V2 and not self._stream_end_hooked:
+            self._stream_end_hooked = True
+            try:
+                @self._app.on_stream_end()
+                async def _end_handler(client, update):
+                    if self._playout_callback and self._chat is not None:
+                        await self._playout_callback(self, self._current_source, "audio")
+            except Exception:
+                pass
 
     async def join(self, chat_id):
         await self._ensure_started()
         self._chat = chat_id
         ACTIVE_GROUP_CALLS[chat_id] = self
-        # Play a short silence to hold the VC slot while the real track is fetched.
-        silence = MediaStream(
-            "resources/startup/vc_silence.wav",
-            video_flags=MediaStream.Flags.IGNORE,
-        )
-        try:
-            await self._app.play(chat_id, silence)
-        except NoActiveGroupCall:
-            raise GroupCallNotFoundError()
+        if IS_V2:
+            silence = MediaStream(
+                "resources/startup/vc_silence.wav",
+                video_flags=MediaStream.Flags.IGNORE,
+            )
+            try:
+                await self._app.play(chat_id, silence)
+            except NoActiveGroupCall:
+                raise GroupCallNotFoundError()
+        else:
+            silence = AudioPiped("resources/startup/vc_silence.wav")
+            try:
+                await self._app.join_group_call(chat_id, silence)
+            except Exception:
+                raise GroupCallNotFoundError()
         if self._network_callback:
             await self._network_callback(self, True)
 
@@ -115,11 +135,18 @@ class _CompatGroupCall:
         self._current_source = source
         if self._chat is None:
             raise GroupCallNotFoundError()
-        stream = create_media_stream(source, is_video=False)
-        try:
-            await self._app.play(self._chat, stream)
-        except NoActiveGroupCall:
-            raise GroupCallNotFoundError()
+        if IS_V2:
+            stream = create_media_stream(source, is_video=False)
+            try:
+                await self._app.play(self._chat, stream)
+            except NoActiveGroupCall:
+                raise GroupCallNotFoundError()
+        else:
+            stream = AudioPiped(source)
+            try:
+                await self._app.change_stream(self._chat, stream)
+            except Exception:
+                await self._app.join_group_call(self._chat, stream)
         if self._network_callback:
             await self._network_callback(self, True)
 
@@ -129,16 +156,22 @@ class _CompatGroupCall:
         self._current_source = source
         if self._chat is None:
             raise GroupCallNotFoundError()
-        stream = create_media_stream(source, is_video=True)
-        try:
-            await self._app.play(self._chat, stream)
-        except NoActiveGroupCall:
-            raise GroupCallNotFoundError()
+        if IS_V2:
+            stream = create_media_stream(source, is_video=True)
+            try:
+                await self._app.play(self._chat, stream)
+            except NoActiveGroupCall:
+                raise GroupCallNotFoundError()
+        else:
+            stream = AudioVideoPiped(source)
+            try:
+                await self._app.change_stream(self._chat, stream)
+            except Exception:
+                await self._app.join_group_call(self._chat, stream)
         if self._network_callback:
             await self._network_callback(self, True)
 
     async def stop_video(self):
-        """No-op: video is part of the regular stream in v2.x."""
         return None
 
     async def stop(self):
@@ -149,7 +182,10 @@ class _CompatGroupCall:
         self._current_source = None
         ACTIVE_GROUP_CALLS.pop(chat_id, None)
         try:
-            await self._app.leave_call(chat_id)
+            if IS_V2:
+                await self._app.leave_call(chat_id)
+            else:
+                await self._app.leave_group_call(chat_id)
         except Exception:
             pass
         finally:
@@ -174,18 +210,28 @@ class _CompatGroupCall:
             raise GroupCallNotFoundError()
         source = self._ensure_valid_source(source)
         self._current_source = source
-        stream = create_media_stream(source, is_video=False)
-        try:
-            await self._app.play(self._chat, stream)
-        except NoActiveGroupCall:
-            raise GroupCallNotFoundError()
+        if IS_V2:
+            stream = create_media_stream(source, is_video=False)
+            try:
+                await self._app.play(self._chat, stream)
+            except NoActiveGroupCall:
+                raise GroupCallNotFoundError()
+        else:
+            stream = AudioPiped(source)
+            try:
+                await self._app.change_stream(self._chat, stream)
+            except Exception:
+                await self._app.join_group_call(self._chat, stream)
 
     async def set_my_volume(self, volume):
         await self._ensure_started()
         if self._chat is None:
             raise GroupCallNotFoundError()
         try:
-            await self._app.change_volume_call(self._chat, volume)
+            if IS_V2:
+                await self._app.set_my_volume(volume)
+            else:
+                await self._app.change_volume_call(self._chat, volume)
         except Exception:
             pass
 
@@ -194,10 +240,13 @@ class _CompatGroupCall:
         if self._chat is None:
             raise GroupCallNotFoundError()
         try:
-            if mute:
-                await self._app.mute(self._chat)
+            if IS_V2:
+                if mute:
+                    await self._app.mute(self._chat)
+                else:
+                    await self._app.unmute(self._chat)
             else:
-                await self._app.unmute(self._chat)
+                await self._app.mute(mute)
         except Exception:
             pass
 
@@ -206,10 +255,16 @@ class _CompatGroupCall:
         if self._chat is None:
             raise GroupCallNotFoundError()
         try:
-            if pause:
-                await self._app.pause(self._chat)
+            if IS_V2:
+                if pause:
+                    await self._app.pause(self._chat)
+                else:
+                    await self._app.resume(self._chat)
             else:
-                await self._app.resume(self._chat)
+                if pause:
+                    await self._app.pause_playout(self._chat)
+                else:
+                    await self._app.resume_playout(self._chat)
         except Exception:
             pass
 
@@ -222,8 +277,12 @@ class _CompatGroupCall:
         try:
             source = self._current_source
             if source and self._chat:
-                stream = create_media_stream(source, is_video=False)
-                await self._app.play(self._chat, stream)
+                if IS_V2:
+                    stream = create_media_stream(source, is_video=False)
+                    await self._app.play(self._chat, stream)
+                else:
+                    stream = AudioPiped(source)
+                    await self._app.change_stream(self._chat, stream)
         except Exception:
             pass
 
@@ -291,6 +350,8 @@ PYTGCALLS_CLIENTS = {}
 ACTIVE_GROUP_CALLS = {}
 
 def create_media_stream(source: str, is_video=False):
+    if not IS_V2:
+        return None
     is_url = source.startswith("http://") or source.startswith("https://")
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -312,6 +373,8 @@ def create_media_stream(source: str, is_video=False):
         )
 
 def setup_pytgcalls_handlers(app):
+    if not IS_V2:
+        return
     @app.on_update()
     async def _global_on_update(client, update):
         if isinstance(update, StreamEnded):
