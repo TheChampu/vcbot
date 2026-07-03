@@ -9,47 +9,53 @@ from urllib.parse import quote_plus
 
 import aiohttp
 
-from pytgcalls import PyTgCalls
-from pytgcalls.types import MediaStream, ChatUpdate, StreamEnded
-from pytgcalls.exceptions import (
-    NoActiveGroupCall,
-    NotInCallError as NotInGroupCallError,
-)
+try:
+    from pytgcalls import GroupCallFactory
+    from pytgcalls.exceptions import GroupCallNotFoundError
+    NotInGroupCallError = GroupCallNotFoundError
+    MediaStream = ChatUpdate = StreamEnded = None
+except ImportError:
+    from pytgcalls import PyTgCalls
+    from pytgcalls.types import MediaStream, ChatUpdate, StreamEnded
+    from pytgcalls.exceptions import (
+        NoActiveGroupCall,
+        NotInCallError as NotInGroupCallError,
+    )
 
-# Compat aliases so the rest of the code can still raise/catch these names
-GroupCallNotFoundError = NoActiveGroupCall
-
-
-def AudioPiped(path):
-    """Audio-only stream (video suppressed)."""
-    return MediaStream(path, video_flags=MediaStream.Flags.IGNORE)
-
-
-def AudioVideoPiped(path, with_audio=True):
-    """Combined audio+video stream."""
-    return MediaStream(path)
+    # Compat aliases so the rest of the code can still raise/catch these names
+    GroupCallNotFoundError = NoActiveGroupCall
 
 
-class GroupCallFactory:
-    class MTPROTO_CLIENT_TYPE(Enum):
-        TELETHON = "telethon"
+    def AudioPiped(path):
+        """Audio-only stream (video suppressed)."""
+        return MediaStream(path, video_flags=MediaStream.Flags.IGNORE)
 
-    def __init__(self, client, client_type):
-        client_id = id(client)
-        if client_id not in PYTGCALLS_CLIENTS:
-            app = PyTgCalls(client)
-            setup_pytgcalls_handlers(app)
-            PYTGCALLS_CLIENTS[client_id] = app
-        self._app = PYTGCALLS_CLIENTS[client_id]
 
-    def get_group_call(self):
-        return _CompatGroupCall(self._app)
+    def AudioVideoPiped(path, with_audio=True):
+        """Combined audio+video stream."""
+        return MediaStream(path)
+
+
+    class GroupCallFactory:
+        class MTPROTO_CLIENT_TYPE(Enum):
+            TELETHON = "telethon"
+
+        def __init__(self, client, client_type):
+            client_id = id(client)
+            if client_id not in PYTGCALLS_CLIENTS:
+                app = PyTgCalls(client)
+                setup_pytgcalls_handlers(app)
+                PYTGCALLS_CLIENTS[client_id] = app
+            self._app = PYTGCALLS_CLIENTS[client_id]
+
+        def get_group_call(self):
+            return _CompatGroupCall(self._app)
 
 
 class _CompatGroupCall:
     """Adapter between the old group-call API used by vcbot and pytgcalls v2.x."""
 
-    def __init__(self, app: PyTgCalls):
+    def __init__(self, app):
         self._app = app
         self._chat = None
         self._current_source = None
@@ -305,7 +311,7 @@ def create_media_stream(source: str, is_video=False):
             ffmpeg_parameters=ffmpeg_params
         )
 
-def setup_pytgcalls_handlers(app: PyTgCalls):
+def setup_pytgcalls_handlers(app):
     @app.on_update()
     async def _global_on_update(client, update):
         if isinstance(update, StreamEnded):
