@@ -404,6 +404,13 @@ async def _safe_send_message(target, *args, **kwargs):
     try:
         try:
             await client.get_entity(target)
+        except ValueError:
+            # Fallback: Fetch dialogs to populate Telethon's entity cache with access hashes
+            try:
+                await client.get_dialogs()
+                await client.get_entity(target)
+            except Exception as e:
+                LOGS.warning(f"Could not resolve entity {target} after get_dialogs: {e}")
         except Exception as e:
             LOGS.warning(f"Could not pre-resolve target entity {target} in _safe_send_message: {e}")
         return await client.send_message(target, *args, **kwargs)
@@ -574,6 +581,13 @@ class Player:
         await self._use_userbot_fallback_if_needed()
         try:
             await self._voice_client.get_entity(self._chat)
+        except ValueError:
+            # Fallback: Fetch dialogs to populate Telethon's entity cache with access hashes
+            try:
+                await self._voice_client.get_dialogs()
+                await self._voice_client.get_entity(self._chat)
+            except Exception as ex:
+                LOGS.warning(f"Could not resolve VC chat entity {self._chat} after get_dialogs: {ex}")
         except Exception as e:
             LOGS.warning(f"Could not pre-resolve VC chat entity {self._chat}: {e}")
         if VIDEO_ON:
