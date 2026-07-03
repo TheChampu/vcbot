@@ -275,7 +275,7 @@ CLIENTS = {}
 STREAM_CACHE = {}
 STREAM_CACHE_TTL = 3600
 LAST_WORKING_COOKIE_FILE = None
-API_URL = os.environ.get("SHRUTI_API_URL") or udB.get_key("YT_API_URL") or "https://api.shrutibots.site"
+API_URL = os.environ.get("SHRUTI_API_URL") or udB.get_key("YT_API_URL") or "http://api01.shrutibots.site"
 API_KEY = os.environ.get("SHRUTI_API_KEY", "ShrutiBotsP3A8xKwYFafG6SuSLTIM")
 DOWNLOAD_DIR = os.path.join(os.getcwd(), "downloads")
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
@@ -396,6 +396,23 @@ def preload_next_in_queue(chat_id):
             LOGS.debug(f"Queue preload error: {e}")
     asyncio.create_task(_preload())
 
+async def _safe_send_message(target, *args, **kwargs):
+    """Send a message via vcClient, falling back to asst if entity cannot be resolved."""
+    try:
+        return await vcClient.send_message(target, *args, **kwargs)
+    except ValueError as e:
+        if "Could not find the input entity" in str(e) or "PeerChannel" in str(e):
+            LOGS.warning(f"vcClient could not resolve entity {target}, retrying with asst: {e}")
+            try:
+                return await asst.send_message(target, *args, **kwargs)
+            except Exception as e2:
+                LOGS.error(f"asst fallback also failed for {target}: {e2}")
+        else:
+            raise
+    except Exception:
+        raise
+
+
 async def send_now_playing_message(chat_id, current_chat_id, title, duration, from_user, link, thumb, pos=None):
     pos_str = f" #{pos}" if pos else ""
     
@@ -430,7 +447,7 @@ async def send_now_playing_message(chat_id, current_chat_id, title, duration, fr
     msg = None
     if thumb:
         try:
-            msg = await vcClient.send_message(
+            msg = await _safe_send_message(
                 current_chat_id,
                 caption,
                 file=thumb,
@@ -443,7 +460,7 @@ async def send_now_playing_message(chat_id, current_chat_id, title, duration, fr
 
     if not msg:
         try:
-            msg = await vcClient.send_message(
+            msg = await _safe_send_message(
                 current_chat_id,
                 plain_caption,
                 link_preview=False,
@@ -474,8 +491,25 @@ SEARCH_ENDPOINTS = (
 
 
 def VC_AUTHS():
+    """Return the full list of user IDs allowed to use VCBOT commands in any group.
+    This includes: Owner, FullSudos, Sudos, and VC-specific sudos.
+    These users do NOT need addauth — they can use VCBOT in any group the userbot is in.
+    """
+    from pyChampu._misc import SUDO_M
     _vcsudos = udB.get_key("VC_SUDOS") or []
-    return [int(a) for a in [*owner_and_sudos(), *_vcsudos]]
+    _all = [*owner_and_sudos(), *SUDO_M.fullsudos, *_vcsudos]
+    # Deduplicate and cast to int safely
+    seen = set()
+    result = []
+    for a in _all:
+        try:
+            val = int(a)
+            if val not in seen:
+                seen.add(val)
+                result.append(val)
+        except (ValueError, TypeError):
+            pass
+    return result
 
 
 class Player:
@@ -608,7 +642,7 @@ class Player:
                         self.group_call._stream_retry_count = retries + 1
                         LOGS.warning(f"Prematurely ended stream (elapsed {elapsed:.1f}s / duration {duration}s). Retrying...")
                         try:
-                            await vcClient.send_message(
+                            await _safe_send_message(
                                 self._current_chat,
                                 f"⚠️ <b>Stream connection lost.</b> Reconnecting and resuming playback... (Attempt {self.group_call._stream_retry_count}/2)",
                                 parse_mode="html"
@@ -637,7 +671,7 @@ class Player:
             return
         self.group_call._ending_in_progress = True
         try:
-            await vcClient.send_message(
+            await _safe_send_message(
                 self._current_chat,
                 "\U0001f3b5 <b>Queue khatam ho gaya!</b>\n\nAb koi song nahi hai. Play karne ke liye <code>play &lt;song name&gt;</code> use karo.",
                 parse_mode="html",
@@ -721,7 +755,7 @@ class Player:
                         VC_QUEUE.pop(chat_id, None)
                     save_queue_to_db()
                     try:
-                        await vcClient.send_message(
+                        await _safe_send_message(
                             self._current_chat,
                             f"⚠️ <b>Error playing:</b> <a href=\"{link}\">{title}</a>\n"
                             f"<code>{str(er)[:100]}</code>\n"
@@ -737,7 +771,7 @@ class Player:
             # For transient errors, keep VC connected and notify.
             LOGS.exception(f"Error playing next song: {er}")
             try:
-                await vcClient.send_message(
+                await _safe_send_message(
                     self._current_chat,
                     f"⚠️ <strong>Error playing next song:</strong> <code>{str(er)[:100]}</code>",
                     parse_mode="html",
@@ -751,7 +785,7 @@ class Player:
 
         if done:
             if announce:
-                await vcClient.send_message(
+                await _safe_send_message(
                     self._current_chat,
                     f"\u2705 <b>VC Join Ho Gaya!</b>\n\n⚡ Ab song play karne ke liye <code>play &lt;song name&gt;</code> use karo.",
                     parse_mode="html",
@@ -759,9 +793,9 @@ class Player:
 
             return True
         if isinstance(err, str):
-            await vcClient.send_message(self._current_chat, err, parse_mode="html")
+            await _safe_send_message(self._current_chat, err, parse_mode="html")
             return False
-        await vcClient.send_message(
+        await _safe_send_message(
             self._current_chat,
             f"\u274c <b>VC Join mein error aaya:</b>\n<code>{err}</code>",
             parse_mode="html",
@@ -806,17 +840,19 @@ def vc_asst(dec, **kwargs):
             PROCESSED_VC_COMMANDS[msg_key] = now
 
             VCAUTH = list(key.keys())
-            if not (
-                allow_all
-                or (e.out)
-                or (e.sender_id in VC_AUTHS())
-                or (vc_auth and e.chat_id in VCAUTH)
-            ):
+            is_trusted = e.out or (e.sender_id in VC_AUTHS())
+
+            if not (allow_all or is_trusted or (vc_auth and e.chat_id in VCAUTH)):
+                # Neither a trusted user nor an auth-listed group — ignore
                 return
-            elif not allow_all and vc_auth and key.get(e.chat_id):
-                cha, adm = key.get(e.chat_id), key[e.chat_id]["admins"]
+
+            # If this is an auth-listed group AND the sender is NOT a trusted user,
+            # enforce the admin-only check if that group requires it.
+            if not allow_all and not is_trusted and vc_auth and key.get(e.chat_id):
+                adm = key[e.chat_id]["admins"]
                 if adm and not (await admin_check(e)):
                     return
+
             try:
                 await func(e)
             except ValueError as er:
@@ -828,11 +864,19 @@ def vc_asst(dec, **kwargs):
                     pass
             except Exception:
                 LOGS.exception("VC handler error")
-                await asst.send_message(
-                    LOG_CHANNEL,
-                    f"VC Error - <code>{UltVer}</code>\n\n<code>{e.text}</code>\n\n<code>{format_exc()}</code>",
-                    parse_mode="html",
-                )
+                try:
+                    log_target = LOG_CHANNEL
+                    log_text = (
+                        f"VC Error - <code>{UltVer}</code>\n\n"
+                        f"<code>{e.text}</code>\n\n"
+                        f"<code>{format_exc()}</code>"
+                    )
+                    if asst and log_target:
+                        await asst.send_message(log_target, log_text, parse_mode="html")
+                    elif log_target:
+                        await _safe_send_message(log_target, log_text, parse_mode="html")
+                except Exception as log_err:
+                    LOGS.error(f"VC error log failed: {log_err}")
 
         vcClient.add_event_handler(
             vc_handler,
@@ -1190,35 +1234,17 @@ async def _api_resolve_stream_url(link, prefer_audio=True):
     link = str(link or "").strip()
     if not link:
         return None
-    timeout = aiohttp.ClientTimeout(total=10)
+    media_type = "audio" if prefer_audio else "video"
+    stream_link = f"{API_URL}/download?url={quote_plus(link)}&type={media_type}"
+    if API_KEY:
+        stream_link += f"&api_key={API_KEY}"
+        
+    timeout = aiohttp.ClientTimeout(total=8)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            media_type = "audio" if prefer_audio else "video"
-            params = {"url": link, "type": media_type}
-            if API_KEY:
-                params["api_key"] = API_KEY
-            headers = {}
-            if API_KEY:
-                headers["x-api-key"] = API_KEY
-                headers["Authorization"] = f"Bearer {API_KEY}"
-            async with session.get(f"{API_URL}/download", params=params, headers=headers) as response:
-                if response.status != 200:
-                    return None
-                data = await response.json(content_type=None)
-
-            for key in ("stream_url", "download_url", "url"):
-                val = data.get(key)
-                if isinstance(val, str) and val.startswith("http"):
-                    return val
-
-            token = data.get("download_token")
-            media_id = data.get("id") or data.get("video_id")
-            if token and media_id:
-                encoded = quote_plus(str(media_id))
-                stream_link = f"{API_URL}/stream/{encoded}?type={media_type}&token={token}"
-                if API_KEY:
-                    stream_link += f"&api_key={API_KEY}"
-                return stream_link
+            async with session.get(stream_link) as response:
+                if response.status == 200:
+                    return stream_link
     except Exception as ex:
         LOGS.warning("API stream resolver failed: %s", str(ex)[:180])
     return None
@@ -1491,6 +1517,11 @@ async def file_download(event, reply, fast_download=True):
     # channel/group the bot cannot resolve (PeerChannel lookup error).
     if reply.document and reply.document.thumbs:
         try:
+            # Pre-resolve the entity so Telethon can look it up before media download.
+            try:
+                await reply.client.get_input_entity(reply.peer_id)
+            except Exception:
+                pass
             thumb = await reply.download_media(os.path.join(DOWNLOAD_DIR, ""), thumb=-1)
         except Exception as e:
             LOGS.debug(f"Thumb download skipped (could not resolve entity): {e}")
