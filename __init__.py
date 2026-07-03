@@ -397,19 +397,18 @@ def preload_next_in_queue(chat_id):
     asyncio.create_task(_preload())
 
 async def _safe_send_message(target, *args, **kwargs):
-    """Send a message via vcClient, falling back to asst if entity cannot be resolved."""
+    """Send a message via the userbot (vcClient), pre-resolving entity to avoid lookup failures."""
+    client = vcClient or champu_bot
+    if not client:
+        return None
     try:
-        return await vcClient.send_message(target, *args, **kwargs)
-    except ValueError as e:
-        if "Could not find the input entity" in str(e) or "PeerChannel" in str(e):
-            LOGS.warning(f"vcClient could not resolve entity {target}, retrying with asst: {e}")
-            try:
-                return await asst.send_message(target, *args, **kwargs)
-            except Exception as e2:
-                LOGS.error(f"asst fallback also failed for {target}: {e2}")
-        else:
-            raise
-    except Exception:
+        try:
+            await client.get_entity(target)
+        except Exception as e:
+            LOGS.warning(f"Could not pre-resolve target entity {target} in _safe_send_message: {e}")
+        return await client.send_message(target, *args, **kwargs)
+    except Exception as e:
+        LOGS.error(f"Failed to send message via userbot client to {target}: {e}")
         raise
 
 
@@ -573,6 +572,10 @@ class Player:
 
     async def startCall(self, allow_create=False):
         await self._use_userbot_fallback_if_needed()
+        try:
+            await self._voice_client.get_entity(self._chat)
+        except Exception as e:
+            LOGS.warning(f"Could not pre-resolve VC chat entity {self._chat}: {e}")
         if VIDEO_ON:
             for chats in VIDEO_ON:
                 await VIDEO_ON[chats].stop()
@@ -871,9 +874,7 @@ def vc_asst(dec, **kwargs):
                         f"<code>{e.text}</code>\n\n"
                         f"<code>{format_exc()}</code>"
                     )
-                    if asst and log_target:
-                        await asst.send_message(log_target, log_text, parse_mode="html")
-                    elif log_target:
+                    if log_target:
                         await _safe_send_message(log_target, log_text, parse_mode="html")
                 except Exception as log_err:
                     LOGS.error(f"VC error log failed: {log_err}")
