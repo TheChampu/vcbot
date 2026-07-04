@@ -10,7 +10,8 @@ from urllib.parse import quote_plus
 import aiohttp
 
 try:
-    from pytgcalls.types import MediaStream, ChatUpdate, StreamEnded
+    from pytgcalls.types import MediaStream, ChatUpdate
+    from pytgcalls.types.stream import StreamEnded
     from pytgcalls.exceptions import NoActiveGroupCall
     IS_V2 = True
     GroupCallNotFoundError = NoActiveGroupCall
