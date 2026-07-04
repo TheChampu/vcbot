@@ -80,10 +80,16 @@ pytgcalls_client = None
 if vcClient:
     try:
         pytgcalls_client = PyTgCalls(vcClient)
+        # PyTgCalls 2.x: start() is synchronous (it launches an internal thread/loop)
+        # Call it directly — do NOT await it here.
         pytgcalls_client.start()
         LOGS.info("PyTgCalls 2.x client started successfully.")
+    except RuntimeError as _rterr:
+        # Already started or loop conflict — log and continue
+        LOGS.warning(f"PyTgCalls start warning (ignored): {_rterr}")
     except Exception as _pytgcalls_err:
         LOGS.exception(_pytgcalls_err)
+        pytgcalls_client = None
 
 
 # ------------------------------------------------------------------
@@ -123,7 +129,18 @@ class GroupCallWrapper:
         """Join the voice chat without starting any media stream."""
         if pytgcalls_client is None:
             raise RuntimeError("PyTgCalls client not initialized (no VC session).")
-        await pytgcalls_client.play(chat_id, None)
+        # PyTgCalls 2.x requires a valid MediaStream — play a silent stream to just join.
+        try:
+            await pytgcalls_client.play(
+                chat_id,
+                MediaStream(
+                    "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3",
+                    video_flags=MediaStream.Flags.IGNORE,
+                ),
+            )
+        except Exception:
+            # Fallback: try joining without an audio source
+            await pytgcalls_client.play(chat_id, MediaStream(video_flags=MediaStream.Flags.IGNORE))
         if chat_id not in ACTIVE_CALLS:
             ACTIVE_CALLS.append(chat_id)
 
@@ -205,7 +222,18 @@ class GroupCallWrapper:
             raise NotInCallError("PyTgCalls client not initialized.")
         if self._chat_id in ACTIVE_CALLS:
             ACTIVE_CALLS.remove(self._chat_id)
-        await pytgcalls_client.play(self._chat_id, None)
+        # Re-join using the last played file if available, else use a silent stream
+        path = VC_STREAM_FILES.get(self._chat_id)
+        try:
+            if path:
+                await pytgcalls_client.play(
+                    self._chat_id,
+                    MediaStream(path, video_flags=MediaStream.Flags.IGNORE),
+                )
+            else:
+                await self.join(self._chat_id)
+        except Exception:
+            await self.join(self._chat_id)
         if self._chat_id not in ACTIVE_CALLS:
             ACTIVE_CALLS.append(self._chat_id)
 
@@ -302,6 +330,13 @@ class Player:
                 dn, err = await self.make_vc_active()
                 if err:
                     return False, err
+                # VC created successfully — now retry joining
+                try:
+                    await asyncio.sleep(1)
+                    await self.group_call.join(self._chat)
+                except Exception as e:
+                    LOGS.exception(e)
+                    return False, e
             except Exception as e:
                 LOGS.exception(e)
                 return False, e
@@ -405,11 +440,12 @@ def vc_asst(dec, **kwargs):
         handler = udB.get_key("VC_HNDLR") or HNDLR
         kwargs["pattern"] = compile_pattern(dec, handler)
         vc_auth = kwargs.get("vc_auth", True)
-        key = udB.get_key("VC_AUTH_GROUPS") or {}
         if "vc_auth" in kwargs:
             del kwargs["vc_auth"]
 
         async def vc_handler(e):
+            # Fetch auth groups fresh on every call so addauth/remauth take effect immediately
+            key = udB.get_key("VC_AUTH_GROUPS") or {}
             VCAUTH = list(key.keys())
             if not (
                 (e.out)
@@ -423,13 +459,16 @@ def vc_asst(dec, **kwargs):
                     return
             try:
                 await func(e)
-            except Exception:
-                LOGS.exception(Exception)
-                await asst.send_message(
-                    LOG_CHANNEL,
-                    f"VC Error - <code>{UltVer}</code>\n\n<code>{e.text}</code>\n\n<code>{format_exc()}</code>",
-                    parse_mode="html",
-                )
+            except Exception as _vc_err:
+                LOGS.exception(_vc_err)
+                try:
+                    await asst.send_message(
+                        LOG_CHANNEL,
+                        f"VC Error - <code>{UltVer}</code>\n\n<code>{e.text}</code>\n\n<code>{format_exc()}</code>",
+                        parse_mode="html",
+                    )
+                except Exception:
+                    pass
 
         vcClient.add_event_handler(
             vc_handler,
@@ -498,6 +537,8 @@ async def download(query):
         thumb, duration = None, "Unknown"
         title = link = query
     else:
+        if VideosSearch is None:
+            raise ImportError("'youtube-search-python' is not installed. Cannot search YouTube.")
         search = VideosSearch(query, limit=1).result()
         data = search["result"][0]
         link = data["link"]
@@ -514,6 +555,8 @@ async def get_stream_link(ytlink):
 
 
 async def vid_download(query):
+    if VideosSearch is None:
+        raise ImportError("'youtube-search-python' is not installed. Cannot search YouTube.")
     search = VideosSearch(query, limit=1).result()
     data = search["result"][0]
     link = data["link"]

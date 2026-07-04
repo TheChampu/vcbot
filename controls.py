@@ -86,23 +86,26 @@ async def volume_setter(event):
     if len(event.text.split()) <= 1:
         return await event.eor(get_string("vcbot_4"))
     inp = event.text.split()
+    vol = None
+    chat = event.chat_id
     if inp[1].startswith(("@","-")):
-        chat = inp[1]
-        vol = int(inp[2])
         try:
-            chat = await event.client.parse_id(chat)
+            chat = await event.client.parse_id(inp[1])
         except Exception as e:
             return await event.eor(get_string("vcbot_2").format(str(e)))
-    elif inp[1].isdigit() and len(inp) == 2:
+        if len(inp) >= 3 and inp[2].isdigit():
+            vol = int(inp[2])
+        else:
+            return await event.eor("**Usage:** `.volume @chat 50` or `.volume 50`")
+    elif inp[1].isdigit():
         vol = int(inp[1])
-        chat = event.chat_id
-    if vol:
+    else:
+        return await event.eor("**Usage:** `.volume 50` (1–200)")
+    if vol is not None:
+        # Clamp first, THEN call set_my_volume
+        vol = max(1, min(200, vol))
         ultSongs = Player(chat)
-        await ultSongs.group_call.set_my_volume(int(vol))
-        if vol > 200:
-            vol = 200
-        elif vol < 1:
-            vol = 1
+        await ultSongs.group_call.set_my_volume(vol)
         return await event.eor(get_string("vcbot_3").format(vol))
 
 

@@ -115,7 +115,6 @@ async def _(e):
         return await xx.edit(get_string("vcbot_17"), time=3)
     if not is_vcsudo(userid):
         return await xx.eor(
-            xx,
             f"[{name}](tg://user?id={userid})` is not approved to use my Voice Chat Bot.`",
             time=5,
         )
