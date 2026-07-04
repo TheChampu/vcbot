@@ -24,9 +24,7 @@
    Skip the current song and play the next in queue, if any.
 """
 
-from pytgcalls.exceptions import NotInCallError as NotConnectedError
-
-from . import vc_asst, Player, get_string,CLIENTS,VIDEO_ON
+from . import vc_asst, Player, get_string, CLIENTS, VIDEO_ON, NotInCallError as NotConnectedError
 
 
 @vc_asst("joinvc")

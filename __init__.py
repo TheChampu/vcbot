@@ -7,8 +7,15 @@ from time import time
 from traceback import format_exc
 
 from pytgcalls import PyTgCalls
-from pytgcalls.types import MediaStream, AudioQuality, VideoQuality, StreamEnded
-from pytgcalls.exceptions import NoActiveGroupCall, NotInCallError
+from pytgcalls.types import (
+    AudioPiped,
+    AudioVideoPiped,
+    HighQualityAudio,
+    HighQualityVideo,
+    StreamAudioEnded,
+    StreamVideoEnded,
+)
+from pytgcalls.exceptions import NoActiveGroupCall, NotInGroupCallError as NotInCallError
 from telethon.errors.rpcerrorlist import (
     ParticipantJoinMissingError,
     ChatSendMediaForbiddenError,
@@ -129,18 +136,15 @@ class GroupCallWrapper:
         """Join the voice chat without starting any media stream."""
         if pytgcalls_client is None:
             raise RuntimeError("PyTgCalls client not initialized (no VC session).")
-        # PyTgCalls 2.x requires a valid MediaStream — play a silent stream to just join.
         try:
-            await pytgcalls_client.play(
+            # Join call with a silent/dummy stream
+            await pytgcalls_client.join_group_call(
                 chat_id,
-                MediaStream(
-                    "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3",
-                    video_flags=MediaStream.Flags.IGNORE,
-                ),
+                AudioPiped("https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3")
             )
-        except Exception:
-            # Fallback: try joining without an audio source
-            await pytgcalls_client.play(chat_id, MediaStream(video_flags=MediaStream.Flags.IGNORE))
+        except Exception as e:
+            LOGS.exception(e)
+            raise e
         if chat_id not in ACTIVE_CALLS:
             ACTIVE_CALLS.append(chat_id)
 
@@ -149,11 +153,11 @@ class GroupCallWrapper:
         if pytgcalls_client is None:
             return
         VC_STREAM_FILES[self._chat_id] = path
-        await pytgcalls_client.play(
-            self._chat_id,
-            MediaStream(path, video_flags=MediaStream.Flags.IGNORE),
-        )
-        if self._chat_id not in ACTIVE_CALLS:
+        stream = AudioPiped(path)
+        if self._chat_id in ACTIVE_CALLS:
+            await pytgcalls_client.change_stream(self._chat_id, stream)
+        else:
+            await pytgcalls_client.join_group_call(self._chat_id, stream)
             ACTIVE_CALLS.append(self._chat_id)
 
     async def start_video(self, path: str, with_audio: bool = True):
@@ -161,19 +165,22 @@ class GroupCallWrapper:
         if pytgcalls_client is None:
             return
         VC_STREAM_FILES[self._chat_id] = path
-        audio_flags = (
-            MediaStream.Flags.AUTO_DETECT if with_audio else MediaStream.Flags.IGNORE
-        )
-        await pytgcalls_client.play(
-            self._chat_id,
-            MediaStream(
+        if with_audio:
+            stream = AudioVideoPiped(
                 path,
-                audio_parameters=AudioQuality.HIGH,
-                video_parameters=VideoQuality.HD_720p,
-                audio_flags=audio_flags,
-            ),
-        )
-        if self._chat_id not in ACTIVE_CALLS:
+                audio_parameters=HighQualityAudio(),
+                video_parameters=HighQualityVideo(),
+            )
+        else:
+            from pytgcalls.types import VideoPiped
+            stream = VideoPiped(
+                path,
+                video_parameters=HighQualityVideo(),
+            )
+        if self._chat_id in ACTIVE_CALLS:
+            await pytgcalls_client.change_stream(self._chat_id, stream)
+        else:
+            await pytgcalls_client.join_group_call(self._chat_id, stream)
             ACTIVE_CALLS.append(self._chat_id)
 
     async def stop(self):
@@ -181,7 +188,7 @@ class GroupCallWrapper:
         if pytgcalls_client is None:
             return
         try:
-            await pytgcalls_client.leave_call(self._chat_id)
+            await pytgcalls_client.leave_group_call(self._chat_id)
         except Exception:
             pass
         if self._chat_id in ACTIVE_CALLS:
@@ -191,7 +198,6 @@ class GroupCallWrapper:
 
     async def stop_video(self):
         """Stop the video portion (audio-only continues)."""
-        # pytgcalls 2.x has no separate stop_video; just update local state.
         VIDEO_ON.pop(self._chat_id, None)
 
     async def set_my_volume(self, volume: int):
@@ -204,49 +210,39 @@ class GroupCallWrapper:
         if pytgcalls_client is None:
             return
         if muted:
-            await pytgcalls_client.mute(self._chat_id)
+            await pytgcalls_client.mute_stream(self._chat_id)
         else:
-            await pytgcalls_client.unmute(self._chat_id)
+            await pytgcalls_client.unmute_stream(self._chat_id)
 
     async def set_pause(self, paused: bool):
         if pytgcalls_client is None:
             return
         if paused:
-            await pytgcalls_client.pause(self._chat_id)
+            await pytgcalls_client.pause_stream(self._chat_id)
         else:
-            await pytgcalls_client.resume(self._chat_id)
+            await pytgcalls_client.resume_stream(self._chat_id)
 
     async def reconnect(self):
         """Reconnect to the voice chat (used by the .rejoin command)."""
         if pytgcalls_client is None:
             raise NotInCallError("PyTgCalls client not initialized.")
+        try:
+            await pytgcalls_client.leave_group_call(self._chat_id)
+        except Exception:
+            pass
         if self._chat_id in ACTIVE_CALLS:
             ACTIVE_CALLS.remove(self._chat_id)
-        # Re-join using the last played file if available, else use a silent stream
         path = VC_STREAM_FILES.get(self._chat_id)
-        try:
-            if path:
-                await pytgcalls_client.play(
-                    self._chat_id,
-                    MediaStream(path, video_flags=MediaStream.Flags.IGNORE),
-                )
-            else:
-                await self.join(self._chat_id)
-        except Exception:
+        if path:
+            await self.start_audio(path)
+        else:
             await self.join(self._chat_id)
-        if self._chat_id not in ACTIVE_CALLS:
-            ACTIVE_CALLS.append(self._chat_id)
 
     def restart_playout(self):
         """Re-play the current song from the beginning."""
         path = VC_STREAM_FILES.get(self._chat_id)
         if path and pytgcalls_client:
-            asyncio.create_task(
-                pytgcalls_client.play(
-                    self._chat_id,
-                    MediaStream(path, video_flags=MediaStream.Flags.IGNORE),
-                )
-            )
+            asyncio.create_task(self.start_audio(path))
 
 
 # ------------------------------------------------------------------
@@ -255,10 +251,8 @@ class GroupCallWrapper:
 
 if pytgcalls_client is not None:
 
-    @pytgcalls_client.on_update()
-    async def _on_stream_ended(update):
-        if not isinstance(update, StreamEnded):
-            return
+    @pytgcalls_client.on_stream_end()
+    async def _on_stream_ended(client, update):
         chat_id = update.chat_id
         source = VC_STREAM_FILES.get(chat_id, "")
         callback = VC_PLAYOUT_CALLBACKS.get(chat_id)
@@ -268,6 +262,7 @@ if pytgcalls_client is not None:
                 await callback(None, source, None)
             except Exception as _cb_err:
                 LOGS.exception(_cb_err)
+
 
 
 # ------------------------------------------------------------------
