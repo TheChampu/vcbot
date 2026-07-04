@@ -1,3 +1,10 @@
+# Ultroid - UserBot
+# Copyright (C) 2021-2022 TeamUltroid
+#
+# This file is a part of < https://github.com/TeamUltroid/Ultroid/ >
+# PLease read the GNU Affero General Public License in
+# <https://www.github.com/TeamUltroid/Ultroid/blob/main/LICENSE/>.
+
 """
 ✘ Commands Available -
 
@@ -8,10 +15,10 @@
    Clear all queue in chat.
 """
 
-from . import vc_asst, get_string, list_queue, VC_QUEUE, save_queue_to_db
+from . import vc_asst, get_string, list_queue, VC_QUEUE
 
 
-@vc_asst("queue(?: |$)")
+@vc_asst("queue")
 async def lstqueue(event):
     if len(event.text.split()) > 1:
         chat = event.text.split()[1]
@@ -27,7 +34,7 @@ async def lstqueue(event):
     await event.eor(f"• <strong>Queue:</strong>\n\n{q}", parse_mode="html")
 
 
-@vc_asst("clearqueue(?: |$)")
+@vc_asst("clearqueue")
 async def clean_queue(event):
     if len(event.text.split()) > 1:
         chat = event.text.split()[1]
@@ -39,5 +46,4 @@ async def clean_queue(event):
         chat = event.chat_id
     if VC_QUEUE.get(chat):
         VC_QUEUE.pop(chat)
-        save_queue_to_db()
     await event.eor(get_string("vcbot_22"), time=5)

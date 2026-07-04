@@ -1,305 +1,19 @@
+
 import asyncio
 import os
 import re
 import traceback
-from enum import Enum
 from time import time
 from traceback import format_exc
-from urllib.parse import quote_plus
 
-import aiohttp
-
-try:
-    from pytgcalls.types import MediaStream, ChatUpdate
-    from pytgcalls.types.stream import StreamEnded
-    from pytgcalls.exceptions import NoActiveGroupCall
-    IS_V2 = True
-    GroupCallNotFoundError = NoActiveGroupCall
-except ImportError:
-    from pytgcalls.types.input_stream import AudioPiped, AudioVideoPiped
-    from pytgcalls.exceptions import GroupCallNotFoundError
-    NotInGroupCallError = GroupCallNotFoundError
-    IS_V2 = False
-
-
-if IS_V2:
-    def AudioPiped(path):
-        """Audio-only stream (video suppressed)."""
-        return MediaStream(path, video_flags=MediaStream.Flags.IGNORE)
-
-    def AudioVideoPiped(path, with_audio=True):
-        """Combined audio+video stream."""
-        return MediaStream(path)
-
-
-class GroupCallFactory:
-    class MTPROTO_CLIENT_TYPE(Enum):
-        TELETHON = "telethon"
-
-    def __init__(self, client, client_type):
-        client_id = id(client)
-        if client_id not in PYTGCALLS_CLIENTS:
-            from pytgcalls import PyTgCalls
-            app = PyTgCalls(client)
-            if IS_V2:
-                setup_pytgcalls_handlers(app)
-            PYTGCALLS_CLIENTS[client_id] = app
-        self._app = PYTGCALLS_CLIENTS[client_id]
-
-    def get_group_call(self):
-        return _CompatGroupCall(self._app)
-
-
-class _CompatGroupCall:
-    """Adapter between the old group-call API used by vcbot and pytgcalls v1.x/v2.x."""
-
-    def __init__(self, app):
-        self._app = app
-        self._chat = None
-        self._current_source = None
-        self._network_callback = None
-        self._playout_callback = None
-        self._started = False
-        self._stream_end_hooked = False
-        self._current_track_start_time = 0
-        self._current_track_duration = 0
-        self._current_track_skipped = False
-        self._stream_retry_count = 0
-
-    @property
-    def is_connected(self):
-        if IS_V2:
-            return self._chat is not None
-        else:
-            return bool(self._chat) and self._app.is_connected
-
-    def _ensure_valid_source(self, source):
-        if not source:
-            raise ValueError("Invalid stream source: None or empty")
-        if IS_V2 and isinstance(source, MediaStream):
-            return source._media_path or source._audio_path or ""
-        return str(source)
-
-    async def _ensure_started(self):
-        if not self._started:
-            await self._app.start()
-            self._started = True
-
-    def on_network_status_changed(self, callback):
-        self._network_callback = callback
-        if not IS_V2:
-            try:
-                @self._app.on_network_status_changed()
-                async def _net_handler(client, is_connected):
-                    if self._network_callback:
-                        await self._network_callback(self, is_connected)
-            except Exception:
-                pass
-
-    def on_playout_ended(self, callback):
-        self._playout_callback = callback
-        if not IS_V2 and not self._stream_end_hooked:
-            self._stream_end_hooked = True
-            try:
-                @self._app.on_stream_end()
-                async def _end_handler(client, update):
-                    if self._playout_callback and self._chat is not None:
-                        await self._playout_callback(self, self._current_source, "audio")
-            except Exception:
-                pass
-
-    async def join(self, chat_id):
-        await self._ensure_started()
-        self._chat = chat_id
-        ACTIVE_GROUP_CALLS[chat_id] = self
-        if IS_V2:
-            silence = MediaStream(
-                "resources/startup/vc_silence.wav",
-                video_flags=MediaStream.Flags.IGNORE,
-            )
-            try:
-                await self._app.play(chat_id, silence)
-            except NoActiveGroupCall:
-                raise GroupCallNotFoundError()
-        else:
-            silence = AudioPiped("resources/startup/vc_silence.wav")
-            try:
-                await self._app.join_group_call(chat_id, silence)
-            except Exception:
-                raise GroupCallNotFoundError()
-        if self._network_callback:
-            await self._network_callback(self, True)
-
-    async def start_audio(self, source):
-        await self._ensure_started()
-        source = self._ensure_valid_source(source)
-        self._current_source = source
-        if self._chat is None:
-            raise GroupCallNotFoundError()
-        if IS_V2:
-            stream = create_media_stream(source, is_video=False)
-            try:
-                await self._app.play(self._chat, stream)
-            except NoActiveGroupCall:
-                raise GroupCallNotFoundError()
-        else:
-            stream = AudioPiped(source)
-            try:
-                await self._app.change_stream(self._chat, stream)
-            except Exception:
-                await self._app.join_group_call(self._chat, stream)
-        if self._network_callback:
-            await self._network_callback(self, True)
-
-    async def start_video(self, source, with_audio=True):
-        await self._ensure_started()
-        source = self._ensure_valid_source(source)
-        self._current_source = source
-        if self._chat is None:
-            raise GroupCallNotFoundError()
-        if IS_V2:
-            stream = create_media_stream(source, is_video=True)
-            try:
-                await self._app.play(self._chat, stream)
-            except NoActiveGroupCall:
-                raise GroupCallNotFoundError()
-        else:
-            stream = AudioVideoPiped(source)
-            try:
-                await self._app.change_stream(self._chat, stream)
-            except Exception:
-                await self._app.join_group_call(self._chat, stream)
-        if self._network_callback:
-            await self._network_callback(self, True)
-
-    async def stop_video(self):
-        return None
-
-    async def stop(self):
-        if self._chat is None:
-            return
-        chat_id = self._chat
-        self._chat = None
-        self._current_source = None
-        ACTIVE_GROUP_CALLS.pop(chat_id, None)
-        try:
-            if IS_V2:
-                await self._app.leave_call(chat_id)
-            else:
-                await self._app.leave_group_call(chat_id)
-        except Exception:
-            pass
-        finally:
-            if self._network_callback:
-                await self._network_callback(self, False)
-
-    async def reconnect(self):
-        await self._ensure_started()
-        if self._chat is None:
-            raise GroupCallNotFoundError()
-        chat_id = self._chat
-        source = self._current_source
-        await self.stop()
-        self._chat = chat_id
-        await self.join(chat_id)
-        if source:
-            await self.start_audio(source)
-
-    async def change_stream(self, source):
-        await self._ensure_started()
-        if self._chat is None:
-            raise GroupCallNotFoundError()
-        source = self._ensure_valid_source(source)
-        self._current_source = source
-        if IS_V2:
-            stream = create_media_stream(source, is_video=False)
-            try:
-                await self._app.play(self._chat, stream)
-            except NoActiveGroupCall:
-                raise GroupCallNotFoundError()
-        else:
-            stream = AudioPiped(source)
-            try:
-                await self._app.change_stream(self._chat, stream)
-            except Exception:
-                await self._app.join_group_call(self._chat, stream)
-
-    async def set_my_volume(self, volume):
-        await self._ensure_started()
-        if self._chat is None:
-            raise GroupCallNotFoundError()
-        try:
-            if IS_V2:
-                await self._app.set_my_volume(volume)
-            else:
-                await self._app.change_volume_call(self._chat, volume)
-        except Exception:
-            pass
-
-    async def set_is_mute(self, mute: bool):
-        await self._ensure_started()
-        if self._chat is None:
-            raise GroupCallNotFoundError()
-        try:
-            if IS_V2:
-                if mute:
-                    await self._app.mute(self._chat)
-                else:
-                    await self._app.unmute(self._chat)
-            else:
-                await self._app.mute(mute)
-        except Exception:
-            pass
-
-    async def set_pause(self, pause: bool):
-        await self._ensure_started()
-        if self._chat is None:
-            raise GroupCallNotFoundError()
-        try:
-            if IS_V2:
-                if pause:
-                    await self._app.pause(self._chat)
-                else:
-                    await self._app.resume(self._chat)
-            else:
-                if pause:
-                    await self._app.pause_playout(self._chat)
-                else:
-                    await self._app.resume_playout(self._chat)
-        except Exception:
-            pass
-
-    def restart_playout(self):
-        """Re-play current source from beginning (fire-and-forget)."""
-        if self._chat is not None and self._current_source:
-            asyncio.ensure_future(self._restart_playout_async())
-
-    async def _restart_playout_async(self):
-        try:
-            source = self._current_source
-            if source and self._chat:
-                if IS_V2:
-                    stream = create_media_stream(source, is_video=False)
-                    await self._app.play(self._chat, stream)
-                else:
-                    stream = AudioPiped(source)
-                    await self._app.change_stream(self._chat, stream)
-        except Exception:
-            pass
-
-    # Legacy aliases kept for compatibility with other vcbot files
-    async def join_group_call(self, *args, **kwargs):
-        return await self.join(*args, **kwargs)
-
-    async def leave_group_call(self, *args, **kwargs):
-        return await self.stop()
-
+from pytgcalls import PyTgCalls
+from pytgcalls.types import MediaStream, AudioQuality, VideoQuality, StreamEnded
+from pytgcalls.exceptions import NoActiveGroupCall, NotInCallError
 from telethon.errors.rpcerrorlist import (
     ParticipantJoinMissingError,
     ChatSendMediaForbiddenError,
 )
-from telethon.errors.rpcbaseerrors import ForbiddenError
-from pyChampu import HNDLR, LOGS, asst, champu_bot, udB, vcClient
+from pyChampu import HNDLR, LOGS, asst, udB, vcClient
 from pyChampu._misc._decorators import compile_pattern
 from pyChampu.fns.helper import (
     bash,
@@ -310,15 +24,17 @@ from pyChampu.fns.helper import (
 )
 from pyChampu.fns.admins import admin_check
 from pyChampu.fns.tools import is_url_ok
-from pyChampu.fns.ytdl import get_videos_link, get_yt_link
+from pyChampu.fns.ytdl import get_videos_link
 from pyChampu._misc import owner_and_sudos, sudoers
 from pyChampu._misc._assistant import in_pattern
 from pyChampu._misc._wrappers import eod, eor
 from pyChampu.version import __version__ as UltVer
 from telethon import events
-from telethon.errors.rpcerrorlist import UserNotParticipantError
 from telethon.tl import functions, types
 from telethon.utils import get_display_name
+
+# Backward-compatibility alias so existing exception-handlers keep working
+GroupCallNotFoundError = NoActiveGroupCall
 
 try:
     from yt_dlp import YoutubeDL
@@ -327,265 +43,218 @@ except ImportError:
     LOGS.error("'yt-dlp' not found!")
 
 try:
-   from youtubesearchpython import VideosSearch
+    from youtubesearchpython import VideosSearch
 except ImportError:
     VideosSearch = None
 
 from strings import get_string
 
+# ------------------------------------------------------------------
+# YouTube API constants (used by vcbot search helpers)
+# ------------------------------------------------------------------
+API_URL = (
+    os.environ.get("SHRUTI_API_URL")
+    or os.environ.get("YT_API_URL")
+    or udB.get_key("YT_API_URL")
+    or "http://api01.shrutibots.site"
+)
+API_KEY = os.environ.get("SHRUTI_API_KEY", "ShrutiBotsP3A8xKwYFafG6SuSLTIM")
+
+# ------------------------------------------------------------------
+# Global state
+# ------------------------------------------------------------------
 asstUserName = asst.me.username
 LOG_CHANNEL = udB.get_key("LOG_CHANNEL")
 ACTIVE_CALLS, VC_QUEUE = [], {}
 MSGID_CACHE, VIDEO_ON = {}, {}
-CLIENTS = {}
-STREAM_CACHE = {}
-STREAM_CACHE_TTL = 3600
-LAST_WORKING_COOKIE_FILE = None
-API_URL = os.environ.get("SHRUTI_API_URL") or udB.get_key("YT_API_URL") or "http://api01.shrutibots.site"
-API_KEY = os.environ.get("SHRUTI_API_KEY", "ShrutiBotsP3A8xKwYFafG6SuSLTIM")
-DOWNLOAD_DIR = os.path.join(os.getcwd(), "downloads")
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-YT_COOKIES_DIR = os.path.join(os.getcwd(), "resources", "cookies")
-os.makedirs(YT_COOKIES_DIR, exist_ok=True)
-PYTGCALLS_CLIENTS = {}
-ACTIVE_GROUP_CALLS = {}
+CLIENTS = {}            # {chat_id: GroupCallWrapper}
 
-def create_media_stream(source: str, is_video=False):
-    if not IS_V2:
-        return None
-    is_url = source.startswith("http://") or source.startswith("https://")
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    } if is_url else None
-    ffmpeg_params = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5" if is_url else None
-    
-    if is_video:
-        return MediaStream(
-            source,
-            headers=headers,
-            ffmpeg_parameters=ffmpeg_params
-        )
-    else:
-        return MediaStream(
-            source,
-            video_flags=MediaStream.Flags.IGNORE,
-            headers=headers,
-            ffmpeg_parameters=ffmpeg_params
-        )
+# Internal tracking for PyTgCalls 2.x integration
+VC_PLAYOUT_CALLBACKS = {}   # {chat_id: async callback(call, source, mtype)}
+VC_STREAM_FILES = {}        # {chat_id: current_file_path}
 
-def setup_pytgcalls_handlers(app):
-    if not IS_V2:
-        return
-    @app.on_update()
-    async def _global_on_update(client, update):
-        if isinstance(update, StreamEnded):
-            chat_id = update.chat_id
-            call = ACTIVE_GROUP_CALLS.get(chat_id)
-            if call and call._playout_callback:
-                await call._playout_callback(call, call._current_source, "audio")
-        elif isinstance(update, ChatUpdate):
-            chat_id = update.chat_id
-            left = bool(update.status & ChatUpdate.Status.LEFT_CALL)
-            call = ACTIVE_GROUP_CALLS.get(chat_id)
-            if call:
-                if call._network_callback:
-                    await call._network_callback(call, not left)
-                if left:
-                    call._chat = None
-                    ACTIVE_GROUP_CALLS.pop(chat_id, None)
-
-def duration_to_seconds(dur_str):
-    if not dur_str or dur_str == "Unknown" or dur_str == "♾":
-        return 0
-    parts = str(dur_str).split(":")
+# ------------------------------------------------------------------
+# Initialize the single global PyTgCalls 2.x client
+# ------------------------------------------------------------------
+pytgcalls_client = None
+if vcClient:
     try:
-        if len(parts) == 3:
-            return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
-        elif len(parts) == 2:
-            return int(parts[0]) * 60 + int(parts[1])
-        elif len(parts) == 1:
-            return int(parts[0])
-    except ValueError:
+        pytgcalls_client = PyTgCalls(vcClient)
+        pytgcalls_client.start()
+        LOGS.info("PyTgCalls 2.x client started successfully.")
+    except Exception as _pytgcalls_err:
+        LOGS.exception(_pytgcalls_err)
+
+
+# ------------------------------------------------------------------
+# GroupCallWrapper — adapts PyTgCalls 2.x to the legacy GroupCall API
+# ------------------------------------------------------------------
+
+class GroupCallWrapper:
+    """
+    Wraps the global PyTgCalls 2.x client and exposes the legacy
+    pytgcalls 0.x GroupCall interface that existing VCBot command
+    files (play.py, controls.py, vctools.py, videoplay.py, etc.)
+    depend on — so none of those files need modification.
+    """
+
+    def __init__(self, chat_id: int):
+        self._chat_id = chat_id
+
+    # ── State ──────────────────────────────────────────────────────
+
+    @property
+    def is_connected(self) -> bool:
+        return self._chat_id in ACTIVE_CALLS
+
+    # ── Legacy callback registration ───────────────────────────────
+
+    def on_network_status_changed(self, callback):
+        """No-op: connectivity is tracked via ACTIVE_CALLS."""
         pass
-    return 0
 
-def save_queue_to_db():
-    try:
-        serializable_queue = {}
-        for chat_id, queue_data in VC_QUEUE.items():
-            serializable_queue[str(chat_id)] = {}
-            for pos, track in queue_data.items():
-                serializable_queue[str(chat_id)][str(pos)] = {
-                    "title": track.get("title", "Unknown"),
-                    "link": track.get("link", ""),
-                    "thumb": track.get("thumb"),
-                    "from_user": track.get("from_user", "Unknown"),
-                    "duration": track.get("duration", "Unknown")
-                }
-        udB.set_key("VC_PERSISTENT_QUEUE", serializable_queue)
-    except Exception as e:
-        LOGS.debug(f"Failed to save queue to DB: {e}")
+    def on_playout_ended(self, callback):
+        """Register the playout-ended callback for this chat."""
+        VC_PLAYOUT_CALLBACKS[self._chat_id] = callback
 
-def load_queue_from_db():
-    try:
-        data = udB.get_key("VC_PERSISTENT_QUEUE")
-        if data and isinstance(data, dict):
-            for chat_id_str, queue_data in data.items():
-                chat_id = int(chat_id_str)
-                VC_QUEUE[chat_id] = {}
-                for pos_str, track in queue_data.items():
-                    pos = int(pos_str)
-                    VC_QUEUE[chat_id][pos] = {
-                        "song": None,
-                        "title": track.get("title", "Unknown"),
-                        "link": track.get("link", ""),
-                        "thumb": track.get("thumb"),
-                        "from_user": track.get("from_user", "Unknown"),
-                        "duration": track.get("duration", "Unknown")
-                    }
-            LOGS.info(f"Successfully restored queue for {len(VC_QUEUE)} chat(s) from DB.")
-    except Exception as e:
-        LOGS.debug(f"Failed to load queue from DB: {e}")
+    # ── Call control ───────────────────────────────────────────────
 
-def preload_next_in_queue(chat_id):
-    async def _preload():
+    async def join(self, chat_id: int):
+        """Join the voice chat without starting any media stream."""
+        if pytgcalls_client is None:
+            raise RuntimeError("PyTgCalls client not initialized (no VC session).")
+        await pytgcalls_client.play(chat_id, None)
+        if chat_id not in ACTIVE_CALLS:
+            ACTIVE_CALLS.append(chat_id)
+
+    async def start_audio(self, path: str):
+        """Start streaming audio-only from *path* (file or URL)."""
+        if pytgcalls_client is None:
+            return
+        VC_STREAM_FILES[self._chat_id] = path
+        await pytgcalls_client.play(
+            self._chat_id,
+            MediaStream(path, video_flags=MediaStream.Flags.IGNORE),
+        )
+        if self._chat_id not in ACTIVE_CALLS:
+            ACTIVE_CALLS.append(self._chat_id)
+
+    async def start_video(self, path: str, with_audio: bool = True):
+        """Start streaming video (and optionally audio) from *path*."""
+        if pytgcalls_client is None:
+            return
+        VC_STREAM_FILES[self._chat_id] = path
+        audio_flags = (
+            MediaStream.Flags.AUTO_DETECT if with_audio else MediaStream.Flags.IGNORE
+        )
+        await pytgcalls_client.play(
+            self._chat_id,
+            MediaStream(
+                path,
+                audio_parameters=AudioQuality.HIGH,
+                video_parameters=VideoQuality.HD_720p,
+                audio_flags=audio_flags,
+            ),
+        )
+        if self._chat_id not in ACTIVE_CALLS:
+            ACTIVE_CALLS.append(self._chat_id)
+
+    async def stop(self):
+        """Leave the voice chat and clean up all state for this chat."""
+        if pytgcalls_client is None:
+            return
         try:
-            if not VC_QUEUE.get(chat_id):
-                return
-            keys = list(VC_QUEUE[chat_id].keys())
-            if not keys:
-                return
-            for pos in keys:
-                info = VC_QUEUE[chat_id][pos]
-                if not info.get("song") and info.get("link"):
-                    LOGS.info(f"Preloading stream link for track in queue: {info.get('title')}")
-                    stream_url = await get_stream_link(info["link"], prefer_audio=True)
-                    info["song"] = stream_url
-                    break
-        except Exception as e:
-            LOGS.debug(f"Queue preload error: {e}")
-    asyncio.create_task(_preload())
+            await pytgcalls_client.leave_call(self._chat_id)
+        except Exception:
+            pass
+        if self._chat_id in ACTIVE_CALLS:
+            ACTIVE_CALLS.remove(self._chat_id)
+        VC_PLAYOUT_CALLBACKS.pop(self._chat_id, None)
+        VC_STREAM_FILES.pop(self._chat_id, None)
 
-async def _safe_send_message(target, *args, **kwargs):
-    """Send a message via the userbot (vcClient), pre-resolving entity to avoid lookup failures."""
-    client = vcClient or champu_bot
-    if not client:
-        return None
-    try:
-        try:
-            await client.get_entity(target)
-        except ValueError:
-            # Fallback: Fetch dialogs to populate Telethon's entity cache with access hashes
+    async def stop_video(self):
+        """Stop the video portion (audio-only continues)."""
+        # pytgcalls 2.x has no separate stop_video; just update local state.
+        VIDEO_ON.pop(self._chat_id, None)
+
+    async def set_my_volume(self, volume: int):
+        if pytgcalls_client is None:
+            return
+        volume = max(1, min(200, volume))
+        await pytgcalls_client.change_volume_call(self._chat_id, volume)
+
+    async def set_is_mute(self, muted: bool):
+        if pytgcalls_client is None:
+            return
+        if muted:
+            await pytgcalls_client.mute(self._chat_id)
+        else:
+            await pytgcalls_client.unmute(self._chat_id)
+
+    async def set_pause(self, paused: bool):
+        if pytgcalls_client is None:
+            return
+        if paused:
+            await pytgcalls_client.pause(self._chat_id)
+        else:
+            await pytgcalls_client.resume(self._chat_id)
+
+    async def reconnect(self):
+        """Reconnect to the voice chat (used by the .rejoin command)."""
+        if pytgcalls_client is None:
+            raise NotInCallError("PyTgCalls client not initialized.")
+        if self._chat_id in ACTIVE_CALLS:
+            ACTIVE_CALLS.remove(self._chat_id)
+        await pytgcalls_client.play(self._chat_id, None)
+        if self._chat_id not in ACTIVE_CALLS:
+            ACTIVE_CALLS.append(self._chat_id)
+
+    def restart_playout(self):
+        """Re-play the current song from the beginning."""
+        path = VC_STREAM_FILES.get(self._chat_id)
+        if path and pytgcalls_client:
+            asyncio.create_task(
+                pytgcalls_client.play(
+                    self._chat_id,
+                    MediaStream(path, video_flags=MediaStream.Flags.IGNORE),
+                )
+            )
+
+
+# ------------------------------------------------------------------
+# Global StreamEnded handler — automatically drives the VC queue
+# ------------------------------------------------------------------
+
+if pytgcalls_client is not None:
+
+    @pytgcalls_client.on_update()
+    async def _on_stream_ended(update):
+        if not isinstance(update, StreamEnded):
+            return
+        chat_id = update.chat_id
+        source = VC_STREAM_FILES.get(chat_id, "")
+        callback = VC_PLAYOUT_CALLBACKS.get(chat_id)
+        if callback:
             try:
-                await client.get_dialogs()
-                await client.get_entity(target)
-            except Exception as e:
-                LOGS.warning(f"Could not resolve entity {target} after get_dialogs: {e}")
-        except Exception as e:
-            LOGS.warning(f"Could not pre-resolve target entity {target} in _safe_send_message: {e}")
-        return await client.send_message(target, *args, **kwargs)
-    except Exception as e:
-        LOGS.error(f"Failed to send message via userbot client to {target}: {e}")
-        raise
+                # Legacy callback signature: (call, source, mtype)
+                await callback(None, source, None)
+            except Exception as _cb_err:
+                LOGS.exception(_cb_err)
 
 
-async def send_now_playing_message(chat_id, current_chat_id, title, duration, from_user, link, thumb, pos=None):
-    pos_str = f" #{pos}" if pos else ""
-    
-    caption = (
-        "<b>\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500</b>\n"
-        f"\U0001f3b5 <b>NOW PLAYING{pos_str}</b>\n"
-        "<b>\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500</b>\n\n"
-        f"\U0001f3a7 <b>Title:</b> <a href=\"{link}\">{title}</a>\n"
-        f"\u23f1 <b>Duration:</b> {duration}\n"
-        f"\U0001f464 <b>Requested By:</b> {from_user}\n\n"
-        "<i>\u2728 Streaming via My Userbot</i>\n"
-        "<b>\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500</b>"
-    )
-    plain_caption = (
-        "<b>\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500</b>\n"
-        f"\U0001f3b5 <b>NOW PLAYING{pos_str}</b>\n"
-        "<b>\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500</b>\n\n"
-        f"\U0001f3a7 <b>Title:</b> {title}\n"
-        f"\u23f1 <b>Duration:</b> {duration}\n"
-        f"\U0001f464 <b>Requested By:</b> {from_user}\n\n"
-        "<i>\u2728 Streaming via My Userbot</i>\n"
-        "<b>\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500</b>"
-    )
-
-    if MSGID_CACHE.get(chat_id):
-        try:
-            await MSGID_CACHE[chat_id].delete()
-        except Exception:
-            pass
-        MSGID_CACHE.pop(chat_id, None)
-
-    msg = None
-    if thumb:
-        try:
-            msg = await _safe_send_message(
-                current_chat_id,
-                caption,
-                file=thumb,
-                link_preview=False,
-                parse_mode="html"
-            )
-        except Exception as e:
-            LOGS.debug(f"Media send failed, falling back to text: {e}")
-            msg = None
-
-    if not msg:
-        try:
-            msg = await _safe_send_message(
-                current_chat_id,
-                plain_caption,
-                link_preview=False,
-                parse_mode="html"
-            )
-        except Exception as e:
-            LOGS.error(f"Failed to send now playing text message: {e}")
-
-    if msg:
-        MSGID_CACHE[chat_id] = msg
-
-    if thumb and os.path.exists(thumb):
-        try:
-            os.remove(thumb)
-        except Exception:
-            pass
-
-SEARCH_ENDPOINTS = (
-    "song/search",
-    "songs/search",
-    "ytsearch",
-    "youtube/search",
-    "search",
-    "song",
-    "songs",
-    "api/search",
-)
+# ------------------------------------------------------------------
+# VC_AUTHS
+# ------------------------------------------------------------------
 
 
 def VC_AUTHS():
-    """Return the full list of user IDs allowed to use VCBOT commands in any group.
-    This includes: Owner, FullSudos, Sudos, and VC-specific sudos.
-    These users do NOT need addauth — they can use VCBOT in any group the userbot is in.
-    """
-    from pyChampu._misc import SUDO_M
     _vcsudos = udB.get_key("VC_SUDOS") or []
-    _all = [*owner_and_sudos(), *SUDO_M.fullsudos, *_vcsudos]
-    # Deduplicate and cast to int safely
-    seen = set()
-    result = []
-    for a in _all:
-        try:
-            val = int(a)
-            if val not in seen:
-                seen.add(val)
-                result.append(val)
-        except (ValueError, TypeError):
-            pass
-    return result
+    return [int(a) for a in [*owner_and_sudos(), *_vcsudos]]
+
+
+# ------------------------------------------------------------------
+# Player
+# ------------------------------------------------------------------
 
 
 class Player:
@@ -593,53 +262,17 @@ class Player:
         self._chat = chat
         self._current_chat = event.chat_id if event else LOG_CHANNEL
         self._video = video
-        self._voice_client = vcClient
         if CLIENTS.get(chat):
             self.group_call = CLIENTS[chat]
         else:
-            self.group_call = self._create_group_call(self._voice_client)
-            CLIENTS.update({chat: self.group_call})
-        # Guard against duplicate on_stream_end callbacks racing each other.
-        if not hasattr(self.group_call, "_queue_lock"):
-            self.group_call._queue_lock = asyncio.Lock()
-        if not hasattr(self.group_call, "_ending_in_progress"):
-            self.group_call._ending_in_progress = False
-
-    @staticmethod
-    def _create_group_call(client):
-        return GroupCallFactory(
-            client,
-            GroupCallFactory.MTPROTO_CLIENT_TYPE.TELETHON,
-        ).get_group_call()
-
-    async def _use_userbot_fallback_if_needed(self):
-        if self._voice_client is champu_bot:
-            return
-        if not champu_bot or getattr(champu_bot.me, "bot", True):
-            return
-        if not getattr(asst, "me", None) or not getattr(asst.me, "bot", True):
-            return
-        try:
-            await asst.get_permissions(self._chat, asst.me.id)
-            return
-        except UserNotParticipantError:
-            LOGS.info(
-                "Assistant bot is not in chat %s, falling back to userbot VC client.",
-                self._chat,
-            )
-        except Exception as er:
-            LOGS.debug(f"Assistant membership check failed for {self._chat}: {er}")
-            return
-
-        self._voice_client = champu_bot
-        self.group_call = self._create_group_call(champu_bot)
-        CLIENTS.update({self._chat: self.group_call})
+            self.group_call = GroupCallWrapper(chat)
+            CLIENTS[chat] = self.group_call
 
     async def make_vc_active(self):
         try:
-            await self._voice_client(
+            await vcClient(
                 functions.phone.CreateGroupCallRequest(
-                    self._chat, title="🎧 Music 🎶"
+                    self._chat, title="🎧 Champu Music 🎶"
                 )
             )
         except Exception as e:
@@ -647,19 +280,7 @@ class Player:
             return False, e
         return True, None
 
-    async def startCall(self, allow_create=False):
-        await self._use_userbot_fallback_if_needed()
-        try:
-            await self._voice_client.get_entity(self._chat)
-        except ValueError:
-            # Fallback: Fetch dialogs to populate Telethon's entity cache with access hashes
-            try:
-                await self._voice_client.get_dialogs()
-                await self._voice_client.get_entity(self._chat)
-            except Exception as ex:
-                LOGS.warning(f"Could not resolve VC chat entity {self._chat} after get_dialogs: {ex}")
-        except Exception as e:
-            LOGS.warning(f"Could not pre-resolve VC chat entity {self._chat}: {e}")
+    async def startCall(self):
         if VIDEO_ON:
             for chats in VIDEO_ON:
                 await VIDEO_ON[chats].stop()
@@ -678,17 +299,9 @@ class Player:
                 await self.group_call.join(self._chat)
             except GroupCallNotFoundError as er:
                 LOGS.info(er)
-                if not allow_create:
-                    return False, "🔴 <b>VC Off Hai!</b>\n\nIs group mein Voice Chat abhi active nahi hai. Pehle VC enable karo, phir play karo."
                 dn, err = await self.make_vc_active()
                 if err:
                     return False, err
-                await asyncio.sleep(1.5)
-                try:
-                    await self.group_call.join(self._chat)
-                except Exception as e:
-                    LOGS.exception(e)
-                    return False, e
             except Exception as e:
                 LOGS.exception(e)
                 return False, e
@@ -703,203 +316,85 @@ class Player:
             ACTIVE_CALLS.remove(chat)
 
     async def playout_ended_handler(self, call, source, mtype):
-        """Handle stream-end safely without double-processing queue events."""
-        lock = self.group_call._queue_lock
-        async with lock:
-            current_source = getattr(self.group_call, "_current_source", None)
-            if current_source and source and current_source != source:
-                LOGS.debug(
-                    "Ignoring stale stream-end event for %s (current: %s)",
-                    source,
-                    current_source,
-                )
-                return
-
-            # Check for broken stream auto-recovery
-            skipped = getattr(self.group_call, "_current_track_skipped", False)
-            start_time = getattr(self.group_call, "_current_track_start_time", 0)
-            duration = getattr(self.group_call, "_current_track_duration", 0)
-            
-            # Auto-recover / resume logic if stream died prematurely
-            if start_time > 0 and duration > 0 and not skipped:
-                elapsed = time() - start_time
-                if elapsed < duration - 15:
-                    retries = getattr(self.group_call, "_stream_retry_count", 0)
-                    if retries < 2:
-                        self.group_call._stream_retry_count = retries + 1
-                        LOGS.warning(f"Prematurely ended stream (elapsed {elapsed:.1f}s / duration {duration}s). Retrying...")
-                        try:
-                            await _safe_send_message(
-                                self._current_chat,
-                                f"⚠️ <b>Stream connection lost.</b> Reconnecting and resuming playback... (Attempt {self.group_call._stream_retry_count}/2)",
-                                parse_mode="html"
-                            )
-                            await self.group_call.reconnect()
-                            return # Exit to avoid skipping to next track
-                        except Exception as rec_err:
-                            LOGS.error(f"Stream auto-recovery failed: {rec_err}")
-            
-            # Reset retry count if we reached the end normally or skipped
-            self.group_call._stream_retry_count = 0
-
-            try:
-                if source and os.path.exists(source) and not source.startswith("http"):
-                    os.remove(source)
-            except Exception as e:
-                LOGS.debug(f"Error removing temp file: {e}")
-
-            try:
-                await self.play_from_queue()
-            except Exception as e:
-                LOGS.exception(f"Error in playout_ended_handler: {e}")
-
-    async def _notify_and_leave_after_queue_end(self):
-        if self.group_call._ending_in_progress:
-            return
-        self.group_call._ending_in_progress = True
-        try:
-            await _safe_send_message(
-                self._current_chat,
-                "\U0001f3b5 <b>Queue khatam ho gaya!</b>\n\nAb koi song nahi hai. Play karne ke liye <code>play &lt;song name&gt;</code> use karo.",
-                parse_mode="html",
-            )
-            # Give Telegram a moment to deliver the message before leaving VC.
-            await asyncio.sleep(1.5)
-            await self.group_call.stop()
-        finally:
-            if CLIENTS.get(self._chat):
-                del CLIENTS[self._chat]
-            self.group_call._ending_in_progress = False
+        if source and os.path.exists(source):
+            os.remove(source)
+        await self.play_from_queue()
 
     async def play_from_queue(self):
+        chat_id = self._chat
+        if chat_id in VIDEO_ON:
+            await self.group_call.stop_video()
+            VIDEO_ON.pop(chat_id, None)
         try:
-            chat_id = self._chat
-            if chat_id in VIDEO_ON:
-                try:
-                    await self.group_call.stop_video()
-                    VIDEO_ON.pop(chat_id)
-                except Exception as e:
-                    LOGS.debug(f"Error stopping video: {e}")
-            
-            # Queue finished: notify and leave VC cleanly.
-            if not VC_QUEUE.get(chat_id) or not VC_QUEUE[chat_id]:
-                await self._notify_and_leave_after_queue_end()
-                return
-            
-            while VC_QUEUE.get(chat_id) and VC_QUEUE[chat_id]:
-                keys = list(VC_QUEUE[chat_id].keys())
-                pos = keys[0]
-                info = VC_QUEUE[chat_id][pos]
-                title = info.get("title", "Unknown")
-                link = info.get("link", "")
-                thumb = info.get("thumb")
-                from_user = info.get("from_user", "Unknown")
-                dur = info.get("duration", "Unknown")
-                
-                try:
-                    song = info.get("song")
-                    if not song:
-                        song = await get_stream_link(link, prefer_audio=True)
-                        info["song"] = song
-                    
-                    try:
-                        await self.group_call.start_audio(song)
-                    except ParticipantJoinMissingError:
-                        LOGS.info("ParticipantJoinMissingError, attempting rejoin")
-                        if not (await self.vc_joiner()):
-                            return
-                        await self.group_call.start_audio(song)
-                    except GroupCallNotFoundError:
-                        LOGS.info("GroupCallNotFoundError, attempting rejoin")
-                        if not (await self.vc_joiner(announce=False)):
-                            return
-                        await self.group_call.start_audio(song)
-                    except NotInGroupCallError:
-                        LOGS.info("NotInGroupCallError, attempting rejoin")
-                        if not (await self.vc_joiner()):
-                            return
-                        await self.group_call.start_audio(song)
-
-                    self.group_call._current_track_start_time = time()
-                    self.group_call._current_track_duration = duration_to_seconds(dur)
-                    self.group_call._current_track_skipped = False
-                    
-                    await send_now_playing_message(chat_id, self._current_chat, title, dur, from_user, link, thumb, pos)
-                    
-                    # Pop and save
-                    VC_QUEUE[chat_id].pop(pos, None)
-                    if not VC_QUEUE[chat_id]:
-                        VC_QUEUE.pop(chat_id, None)
-                    
-                    save_queue_to_db()
-                    preload_next_in_queue(chat_id)
-                    return
-                    
-                except Exception as er:
-                    LOGS.exception(f"Error playing song {title} ({link}): {er}")
-                    VC_QUEUE[chat_id].pop(pos, None)
-                    if not VC_QUEUE[chat_id]:
-                        VC_QUEUE.pop(chat_id, None)
-                    save_queue_to_db()
-                    try:
-                        await _safe_send_message(
-                            self._current_chat,
-                            f"⚠️ <b>Error playing:</b> <a href=\"{link}\">{title}</a>\n"
-                            f"<code>{str(er)[:100]}</code>\n"
-                            f"<i>Skipping to the next track...</i>",
-                            parse_mode="html",
-                            link_preview=False
-                        )
-                    except Exception:
-                        pass
-            
-            await self._notify_and_leave_after_queue_end()
-        except Exception as er:
-            # For transient errors, keep VC connected and notify.
-            LOGS.exception(f"Error playing next song: {er}")
+            song, title, link, thumb, from_user, pos, dur = await get_from_queue(
+                chat_id
+            )
             try:
-                await _safe_send_message(
+                await self.group_call.start_audio(song)
+            except ParticipantJoinMissingError:
+                await self.vc_joiner()
+                await self.group_call.start_audio(song)
+            if MSGID_CACHE.get(chat_id):
+                await MSGID_CACHE[chat_id].delete()
+                del MSGID_CACHE[chat_id]
+            text = (
+                f"<strong>🎧 Now playing #{pos}: <a href={link}>{title}</a>"
+                f"\n⏰ Duration:</strong> <code>{dur}</code>"
+                f"\n👤 <strong>Requested by:</strong> {from_user}"
+            )
+            try:
+                xx = await vcClient.send_message(
                     self._current_chat,
-                    f"⚠️ <strong>Error playing next song:</strong> <code>{str(er)[:100]}</code>",
+                    text,
+                    file=thumb,
+                    link_preview=False,
                     parse_mode="html",
                 )
-            except Exception:
-                pass
+            except ChatSendMediaForbiddenError:
+                xx = await vcClient.send_message(
+                    self._current_chat, text, link_preview=False, parse_mode="html"
+                )
+            MSGID_CACHE.update({chat_id: xx})
+            VC_QUEUE[chat_id].pop(pos)
+            if not VC_QUEUE[chat_id]:
+                VC_QUEUE.pop(chat_id)
 
-    async def vc_joiner(self, announce=True, allow_create=False):
+        except (IndexError, KeyError):
+            await self.group_call.stop()
+            CLIENTS.pop(self._chat, None)
+            await vcClient.send_message(
+                self._current_chat,
+                f"• Successfully Left Vc : <code>{chat_id}</code> •",
+                parse_mode="html",
+            )
+        except Exception as er:
+            LOGS.exception(er)
+            await vcClient.send_message(
+                self._current_chat,
+                f"<strong>ERROR:</strong> <code>{format_exc()}</code>",
+                parse_mode="html",
+            )
+
+    async def vc_joiner(self):
         chat_id = self._chat
-        done, err = await self.startCall(allow_create=allow_create)
+        done, err = await self.startCall()
 
         if done:
-            if announce:
-                await _safe_send_message(
-                    self._current_chat,
-                    f"\u2705 <b>VC Join Ho Gaya!</b>\n\n⚡ Ab song play karne ke liye <code>play &lt;song name&gt;</code> use karo.",
-                    parse_mode="html",
-                )
-
+            await vcClient.send_message(
+                self._current_chat,
+                f"• Joined VC in <code>{chat_id}</code>",
+                parse_mode="html",
+            )
             return True
-        if isinstance(err, str):
-            await _safe_send_message(self._current_chat, err, parse_mode="html")
-            return False
-        await _safe_send_message(
+        await vcClient.send_message(
             self._current_chat,
-            f"\u274c <b>VC Join mein error aaya:</b>\n<code>{err}</code>",
+            f"<strong>ERROR while Joining Vc -</strong> <code>{chat_id}</code> :\n<code>{err}</code>",
             parse_mode="html",
         )
         return False
 
 
-async def ensure_vc(chat, event=None, video=False, announce=False):
-    player = Player(chat, event, video)
-    if player.group_call.is_connected:
-        return player
-    if not await player.vc_joiner(announce=announce):
-        return None
-    return player
-
-
-PROCESSED_VC_COMMANDS = {}
+# ------------------------------------------------------------------
 
 
 def vc_asst(dec, **kwargs):
@@ -910,78 +405,41 @@ def vc_asst(dec, **kwargs):
         handler = udB.get_key("VC_HNDLR") or HNDLR
         kwargs["pattern"] = compile_pattern(dec, handler)
         vc_auth = kwargs.get("vc_auth", True)
-        allow_all = kwargs.get("allow_all", False)  # Default: sirf owner+sudos+vc_sudos
         key = udB.get_key("VC_AUTH_GROUPS") or {}
         if "vc_auth" in kwargs:
             del kwargs["vc_auth"]
-        if "allow_all" in kwargs:
-            del kwargs["allow_all"]
 
         async def vc_handler(e):
-            # Prevent duplicate processing of the same message by multiple clients
-            msg_key = (e.chat_id, e.id)
-            now = time()
-            if msg_key in PROCESSED_VC_COMMANDS:
-                if now - PROCESSED_VC_COMMANDS[msg_key] < 5:
-                    return
-            PROCESSED_VC_COMMANDS[msg_key] = now
-
             VCAUTH = list(key.keys())
-            is_trusted = e.out or (e.sender_id in VC_AUTHS())
-
-            if not (allow_all or is_trusted or (vc_auth and e.chat_id in VCAUTH)):
-                # Neither a trusted user nor an auth-listed group — ignore
+            if not (
+                (e.out)
+                or (e.sender_id in VC_AUTHS())
+                or (vc_auth and e.chat_id in VCAUTH)
+            ):
                 return
-
-            # If this is an auth-listed group AND the sender is NOT a trusted user,
-            # enforce the admin-only check if that group requires it.
-            if not allow_all and not is_trusted and vc_auth and key.get(e.chat_id):
-                adm = key[e.chat_id]["admins"]
+            elif vc_auth and key.get(e.chat_id):
+                cha, adm = key.get(e.chat_id), key[e.chat_id]["admins"]
                 if adm and not (await admin_check(e)):
                     return
-
             try:
                 await func(e)
-            except ValueError as er:
-                msg = str(er).strip() or "Could not process this request."
-                LOGS.warning("VC command failed: %s", msg[:220])
-                try:
-                    await e.reply(f"❌ {msg}")
-                except Exception:
-                    pass
             except Exception:
-                LOGS.exception("VC handler error")
-                try:
-                    log_target = LOG_CHANNEL
-                    log_text = (
-                        f"VC Error - <code>{UltVer}</code>\n\n"
-                        f"<code>{e.text}</code>\n\n"
-                        f"<code>{format_exc()}</code>"
-                    )
-                    if log_target:
-                        await _safe_send_message(log_target, log_text, parse_mode="html")
-                except Exception as log_err:
-                    LOGS.error(f"VC error log failed: {log_err}")
+                LOGS.exception(Exception)
+                await asst.send_message(
+                    LOG_CHANNEL,
+                    f"VC Error - <code>{UltVer}</code>\n\n<code>{e.text}</code>\n\n<code>{format_exc()}</code>",
+                    parse_mode="html",
+                )
 
         vcClient.add_event_handler(
             vc_handler,
             events.NewMessage(**kwargs),
         )
-        if champu_bot and champu_bot is not vcClient:
-            champu_bot.add_event_handler(
-                vc_handler,
-                events.NewMessage(**kwargs),
-            )
-        if asst and asst is not vcClient and asst is not champu_bot:
-            asst.add_event_handler(
-                vc_handler,
-                events.NewMessage(**kwargs),
-            )
 
     return ult
 
 
-# --------------------------------------------------
+# ------------------------------------------------------------------
 
 
 def add_to_queue(chat_id, song, song_name, link, thumb, from_user, duration):
@@ -1028,11 +486,11 @@ async def get_from_queue(chat_id):
     from_user = info["from_user"]
     duration = info["duration"]
     if not song:
-        song = await get_stream_link(link, prefer_audio=True)
+        song = await get_stream_link(link)
     return song, title, link, thumb, from_user, play_this, duration
 
 
-# --------------------------------------------------
+# ------------------------------------------------------------------
 
 
 async def download(query):
@@ -1040,553 +498,64 @@ async def download(query):
         thumb, duration = None, "Unknown"
         title = link = query
     else:
-        data = None
-        link = None
-
-        # ── Step 1: Try API search first (fastest, no bot-check) ──────────────
-        try:
-            api_link = await _api_search_youtube_link(query)
-            if api_link:
-                link = api_link
-        except Exception as ex:
-            LOGS.debug("API search failed for query '%s': %s", query, str(ex)[:180])
-
-        # ── Step 2: VideosSearch for rich metadata ─────────────────────────────
-        if VideosSearch:
-            try:
-                search = VideosSearch(query, limit=1).result()
-                data = search["result"][0]
-                # If API gave us link but VideosSearch has better metadata, use data
-                if not link:
-                    link = data["link"]
-            except Exception as ex:
-                LOGS.warning("VideosSearch failed for query '%s': %s", query, str(ex)[:180])
-
-        if data:
-            link = data.get("link") or link
-            title = data["title"]
-            duration = data.get("duration") or "♾"
-            thumb = f"https://i.ytimg.com/vi/{data['id']}/hqdefault.jpg"
-        elif link:
-            # API found the link but no rich metadata
-            title = query
-            duration = "Unknown"
-            thumb = None
-        else:
-            # ── Step 3: Last resort fallback ───────────────────────────────────
-            link = get_yt_link(query)
-            if not link:
-                raise ValueError("No playable YouTube result found")
-            title = link
-            duration = "Unknown"
-            thumb = None
-
-    dl = await get_stream_link(link, prefer_audio=True)
+        search = VideosSearch(query, limit=1).result()
+        data = search["result"][0]
+        link = data["link"]
+        title = data["title"]
+        duration = data.get("duration") or "♾"
+        thumb = f"https://i.ytimg.com/vi/{data['id']}/hqdefault.jpg"
+    dl = await get_stream_link(link)
     return dl, thumb, title, link, duration
 
 
-async def get_stream_link(ytlink, prefer_audio=True):
-    """
-    info = YoutubeDL({}).extract_info(url=ytlink, download=False)
-    k = ""
-    for x in info["formats"]:
-        h, w = ([x["height"], x["width"]])
-        if h and w:
-            if h <= 720 and w <= 1280:
-                k = x["url"]
-    return k
-    """
-    if isinstance(ytlink, (list, tuple)):
-        ytlink = ytlink[0] if ytlink else ""
-    ytlink = str(ytlink or "").strip()
-    if not ytlink:
-        raise ValueError("Could not resolve a playable stream URL")
-
-    cached = _stream_cache_get(ytlink, prefer_audio)
-    if cached:
-        return cached
-
-    last_error = ""
-
-    # ── Priority 1: Shruti API (fastest, no bot-check issues) ─────────────────
-    api_stream = await _api_resolve_stream_url(ytlink, prefer_audio=prefer_audio)
-    if api_stream:
-        _stream_cache_set(ytlink, prefer_audio, api_stream)
-        return api_stream
-
-    # ── Priority 2: yt-dlp with cookies, then without ─────────────────────────
-    selector = "bestaudio/best" if prefer_audio else "best[height<=?720][width<=?1280]/best"
-    cookie_files = _ordered_cookie_files() + [None]  # cookies first, no-cookie last
-
-    for cookie_file in cookie_files:
-        direct, api_error = await _extract_stream_with_ytdlp(
-            ytlink, cookie_file=cookie_file, prefer_audio=prefer_audio
-        )
-        if direct:
-            global LAST_WORKING_COOKIE_FILE
-            if cookie_file:
-                LAST_WORKING_COOKIE_FILE = cookie_file
-            _stream_cache_set(ytlink, prefer_audio, direct)
-            return direct
-        if api_error:
-            last_error = str(api_error)
-
-        safe_link = ytlink.replace('"', '\\"')
-        quoted = '"' + safe_link + '"'
-        cookie_arg = ""
-        if cookie_file:
-            safe_cookie = cookie_file.replace('"', '\\"')
-            cookie_arg = f' --cookies "{safe_cookie}"'
-
-        out, _ = await bash(
-            f'yt-dlp -g -f "{selector}"{cookie_arg} {quoted}'
-        )
-        primary = (out or "").strip().splitlines()
-        if primary and primary[0].strip():
-            stream_url = primary[0].strip()
-            if cookie_file:
-                LAST_WORKING_COOKIE_FILE = cookie_file
-            _stream_cache_set(ytlink, prefer_audio, stream_url)
-            return stream_url
-
-        out, err = await bash(f"yt-dlp -g{cookie_arg} {quoted}")
-        primary = (out or "").strip().splitlines()
-        if primary and primary[0].strip():
-            stream_url = primary[0].strip()
-            if cookie_file:
-                LAST_WORKING_COOKIE_FILE = cookie_file
-            _stream_cache_set(ytlink, prefer_audio, stream_url)
-            return stream_url
-        if err:
-            last_error = str(err)
-
-    if _is_youtube_bot_challenge(last_error):
-        raise ValueError(
-            "YouTube blocked playback (bot check). API also failed. "
-            "Put valid cookies .txt/.json files in resources/cookies"
-        )
-    raise ValueError("Could not resolve a playable stream URL")
-
-
-def _ytdlp_cookie_files():
-    out = []
-    seen = set()
-
-    # Optional explicit cookie file via env/db.
-    for key in ("YTDLP_COOKIES_FILE", "YT_COOKIES_FILE", "YTDLP_COOKIES", "YT_COOKIES"):
-        value = os.getenv(key)
-        if isinstance(value, str) and value.strip() and os.path.exists(value.strip()):
-            p = value.strip()
-            if p not in seen:
-                seen.add(p)
-                out.append(p)
-    try:
-        db_value = udB.get_key("YTDLP_COOKIES_FILE") or udB.get_key("YT_COOKIES_FILE")
-        if isinstance(db_value, str) and db_value.strip() and os.path.exists(db_value.strip()):
-            p = db_value.strip()
-            if p not in seen:
-                seen.add(p)
-                out.append(p)
-    except Exception:
-        pass
-
-    # Folder-based cookies requested by user.
-    if os.path.isdir(YT_COOKIES_DIR):
-        for name in sorted(os.listdir(YT_COOKIES_DIR)):
-            path = os.path.join(YT_COOKIES_DIR, name)
-            if not os.path.isfile(path):
-                continue
-            low = name.lower()
-            if not (low.endswith(".txt") or low.endswith(".json")):
-                continue
-            if path not in seen:
-                seen.add(path)
-                out.append(path)
-    return out
-
-
-def _ordered_cookie_files():
-    files = _ytdlp_cookie_files()
-    global LAST_WORKING_COOKIE_FILE
-    if LAST_WORKING_COOKIE_FILE and LAST_WORKING_COOKIE_FILE in files:
-        files.remove(LAST_WORKING_COOKIE_FILE)
-        files.insert(0, LAST_WORKING_COOKIE_FILE)
-    return files
-
-
-def _stream_cache_get(url, prefer_audio):
-    key = (str(url).strip(), bool(prefer_audio))
-    data = STREAM_CACHE.get(key)
-    if not data:
-        return None
-    stream_url, ts = data
-    if (time() - ts) > STREAM_CACHE_TTL:
-        STREAM_CACHE.pop(key, None)
-        return None
-    return stream_url
-
-
-def _stream_cache_set(url, prefer_audio, stream_url):
-    key = (str(url).strip(), bool(prefer_audio))
-    STREAM_CACHE[key] = (stream_url, time())
-
-
-def _ytdlp_common_opts(cookie_file=None) -> dict:
-    opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "extract_flat": False,
-    }
-    if not cookie_file:
-        files = _ordered_cookie_files()
-        cookie_file = files[0] if files else None
-    if cookie_file:
-        opts["cookiefile"] = cookie_file
-    return opts
-
-
-def _is_youtube_bot_challenge(error_text: str) -> bool:
-    text = str(error_text or "").lower()
-    checks = (
-        "sign in to confirm you're not a bot",
-        "sign in to confirm you’re not a bot",
-        "use --cookies-from-browser",
-        "use --cookies",
-    )
-    return any(c in text for c in checks)
-
-
-async def _extract_stream_with_ytdlp(ytlink, cookie_file=None, prefer_audio=True):
-    if not YoutubeDL:
-        return None, "yt-dlp not installed"
-
-    def _pick_stream_url():
-        opts = _ytdlp_common_opts(cookie_file=cookie_file)
-        info = YoutubeDL(opts).extract_info(ytlink, download=False)
-        if not isinstance(info, dict):
-            return None
-
-        direct = info.get("url")
-        if isinstance(direct, str) and direct.strip():
-            return direct.strip()
-
-        formats = info.get("formats") or []
-        best_audio = None
-        best_av = None
-        best_any = None
-        for fmt in formats:
-            if not isinstance(fmt, dict):
-                continue
-            url = fmt.get("url")
-            if not isinstance(url, str) or not url.strip():
-                continue
-            if best_any is None:
-                best_any = url.strip()
-
-            width = fmt.get("width")
-            height = fmt.get("height")
-            vcodec = str(fmt.get("vcodec") or "")
-            acodec = str(fmt.get("acodec") or "")
-            has_video = vcodec != "none"
-            has_audio = acodec != "none"
-            if has_audio and not has_video:
-                abr = fmt.get("abr") or 0
-                prev_abr = best_audio[1] if best_audio else 0
-                if abr >= prev_abr:
-                    best_audio = (url.strip(), abr)
-            if has_video and has_audio:
-                if width and height and width <= 1280 and height <= 720:
-                    best_av = url.strip()
-        if prefer_audio and best_audio:
-            return best_audio[0]
-        return best_av or (best_audio[0] if best_audio else None) or best_any
-
-    try:
-        return await asyncio.to_thread(_pick_stream_url), None
-    except Exception as ex:
-        msg = str(ex)[:220]
-        if cookie_file:
-            LOGS.warning("yt-dlp failed with cookie %s: %s", os.path.basename(cookie_file), msg)
-        elif _is_youtube_bot_challenge(msg):
-            LOGS.warning("yt-dlp blocked by YouTube bot challenge")
-        else:
-            LOGS.warning("yt-dlp API stream extraction failed: %s", msg)
-        return None, msg
-
-
-async def _api_resolve_stream_url(link, prefer_audio=True):
-    link = str(link or "").strip()
-    if not link:
-        return None
-    media_type = "audio" if prefer_audio else "video"
-    stream_link = f"{API_URL}/download?url={quote_plus(link)}&type={media_type}"
-    if API_KEY:
-        stream_link += f"&api_key={API_KEY}"
-        
-    timeout = aiohttp.ClientTimeout(total=8)
-    try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(stream_link) as response:
-                if response.status == 200:
-                    return stream_link
-    except Exception as ex:
-        LOGS.warning("API stream resolver failed: %s", str(ex)[:180])
-    return None
-
-
-def _extract_api_link(payload):
-    if not isinstance(payload, dict):
-        return None
-    for key in ("link", "url", "video_url", "videoUrl", "webpage_url"):
-        val = payload.get(key)
-        if isinstance(val, str) and "youtube" in val:
-            return val
-    vid = payload.get("id") or payload.get("video_id") or payload.get("videoId")
-    if isinstance(vid, str) and vid.strip():
-        return f"https://youtube.com/watch?v={vid.strip()}"
-    return None
-
-
-def _extract_api_link_deep(data):
-    if isinstance(data, list):
-        for item in data:
-            found = _extract_api_link_deep(item)
-            if found:
-                return found
-        return None
-    if isinstance(data, dict):
-        direct = _extract_api_link(data)
-        if direct:
-            return direct
-        for key in ("result", "results", "data", "song", "songs", "videos"):
-            found = _extract_api_link_deep(data.get(key))
-            if found:
-                return found
-    return None
-
-
-def _videosearch_to_metadata(data):
-    if not isinstance(data, dict):
-        return None
-    link = data.get("link")
-    if not isinstance(link, str) or not link.strip():
-        return None
-    vid = data.get("id")
-    thumb = None
-    if isinstance(vid, str) and vid.strip():
-        thumb = f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
-    return {
-        "link": link.strip(),
-        "title": str(data.get("title") or link).strip(),
-        "duration": data.get("duration") or "♾",
-        "thumb": thumb,
-    }
-
-
-async def _metadata_from_url(url, fallback_title=None):
-    url = str(url or "").strip()
-    if not url:
-        return None
-
-    title = fallback_title or url
-    duration = "Unknown"
-    thumb = None
-
-    if YoutubeDL:
-        def _extract():
-            opts = _ytdlp_common_opts()
-            return YoutubeDL(opts).extract_info(url, download=False)
-
-        try:
-            info = await asyncio.to_thread(_extract)
-            if isinstance(info, dict):
-                title = str(info.get("title") or title).strip()
-                seconds = info.get("duration")
-                if isinstance(seconds, (int, float)) and seconds > 0:
-                    duration = time_formatter(int(seconds * 1000))
-                elif info.get("is_live"):
-                    duration = "♾"
-                thumb = info.get("thumbnail") or thumb
-                url = str(info.get("webpage_url") or info.get("original_url") or url).strip()
-        except Exception as ex:
-            LOGS.warning("yt-dlp metadata extraction failed: %s", str(ex)[:180])
-
-    return {
-        "link": url,
-        "title": title,
-        "duration": duration,
-        "thumb": thumb,
-    }
-
-
-async def _resolve_video_metadata(query):
-    query = str(query or "").strip()
-    if not query:
-        return None
-
-    if VideosSearch:
-        try:
-            search = await asyncio.to_thread(lambda: VideosSearch(query, limit=1).result())
-            results = (search or {}).get("result") or []
-            if results:
-                parsed = _videosearch_to_metadata(results[0])
-                if parsed:
-                    return parsed
-        except Exception as ex:
-            LOGS.warning("VideosSearch failed for '%s': %s", query, str(ex)[:180])
-
-    link = query if is_url_ok(query) else None
-    if not link:
-        link = await _api_search_youtube_link(query)
-    if not link:
-        link = get_yt_link(query)
-    if not link:
-        return None
-
-    return await _metadata_from_url(link, fallback_title=query)
-
-
-async def _api_search_youtube_link(query):
-    encoded_query = quote_plus(query)
-    timeout = aiohttp.ClientTimeout(total=8)
-    try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            for endpoint in SEARCH_ENDPOINTS:
-                for param in ("query", "q", "search"):
-                    api = f"{API_URL}/{endpoint}?{param}={encoded_query}"
-                    if API_KEY:
-                        api += f"&api_key={API_KEY}"
-                    headers = {}
-                    if API_KEY:
-                        headers["x-api-key"] = API_KEY
-                        headers["Authorization"] = f"Bearer {API_KEY}"
-                    try:
-                        async with session.get(api, headers=headers) as response:
-                            if response.status != 200:
-                                continue
-                            data = await response.json(content_type=None)
-                    except Exception:
-                        continue
-
-                    link = _extract_api_link_deep(data)
-                    if link:
-                        return link
-    except Exception:
-        pass
-    return None
+async def get_stream_link(ytlink):
+    stream = await bash(f'yt-dlp -g -f "best[height<=?720][width<=?1280]" {ytlink}')
+    return stream[0]
 
 
 async def vid_download(query):
-    info = await _resolve_video_metadata(query)
-    if not info:
-        raise ValueError("No playable video result found")
-    link = info["link"]
-    video = await get_stream_link(link, prefer_audio=False)
-    return video, info.get("thumb"), info.get("title") or link, link, info.get("duration") or "Unknown"
+    search = VideosSearch(query, limit=1).result()
+    data = search["result"][0]
+    link = data["link"]
+    video = await get_stream_link(link)
+    title = data["title"]
+    thumb = f"https://i.ytimg.com/vi/{data['id']}/hqdefault.jpg"
+    duration = data.get("duration") or "♾"
+    return video, thumb, title, link, duration
 
 
 async def dl_playlist(chat, from_user, link):
     # untill issue get fix
     # https://github.com/alexmercerind/youtube-search-python/issues/107
-    """
-    vids = Playlist.getVideos(link)
-    try:
-        vid1 = vids["videos"][0]
-        duration = vid1["duration"] or "♾"
-        title = vid1["title"]
-        song = await get_stream_link(vid1['link'])
-        thumb = f"https://i.ytimg.com/vi/{vid1['id']}/hqdefault.jpg"
-        return song[0], thumb, title, vid1["link"], duration
-    finally:
-        vids = vids["videos"][1:]
-        for z in vids:
-            duration = z["duration"] or "♾"
-            title = z["title"]
-            thumb = f"https://i.ytimg.com/vi/{z['id']}/hqdefault.jpg"
-            add_to_queue(chat, None, title, z["link"], thumb, from_user, duration)
-    """
     links = await get_videos_link(link)
-    if not links:
-        raise ValueError("Could not read playlist items")
-
-    async def _meta_for_playlist_item(item_link):
-        if VideosSearch:
-            try:
-                search = await asyncio.to_thread(
-                    lambda: VideosSearch(item_link, limit=1).result()
-                )
-                results = (search or {}).get("result") or []
-                if results:
-                    parsed = _videosearch_to_metadata(results[0])
-                    if parsed:
-                        return parsed
-            except Exception as ex:
-                LOGS.warning(
-                    "VideosSearch playlist lookup failed for '%s': %s",
-                    item_link,
-                    str(ex)[:180],
-                )
-
-        return await _metadata_from_url(item_link, fallback_title=item_link)
-
     try:
-        first = await _meta_for_playlist_item(links[0])
-        if not first:
-            raise ValueError("Could not resolve first playlist video")
-        song = await get_stream_link(first["link"], prefer_audio=True)
-        return (
-            song,
-            first.get("thumb"),
-            first.get("title") or links[0],
-            first["link"],
-            first.get("duration") or "Unknown",
-        )
+        search = VideosSearch(links[0], limit=1).result()
+        vid1 = search["result"][0]
+        duration = vid1.get("duration") or "♾"
+        title = vid1["title"]
+        song = await get_stream_link(vid1["link"])
+        thumb = f"https://i.ytimg.com/vi/{vid1['id']}/hqdefault.jpg"
+        return song, thumb, title, vid1["link"], duration
     finally:
         for z in links[1:]:
             try:
-                meta = await _meta_for_playlist_item(z)
-                if not meta:
-                    continue
-                add_to_queue(
-                    chat,
-                    None,
-                    meta.get("title") or z,
-                    meta["link"],
-                    meta.get("thumb"),
-                    from_user,
-                    meta.get("duration") or "Unknown",
-                )
+                search = VideosSearch(z, limit=1).result()
+                vid = search["result"][0]
+                duration = vid.get("duration") or "♾"
+                title = vid["title"]
+                thumb = f"https://i.ytimg.com/vi/{vid['id']}/hqdefault.jpg"
+                add_to_queue(chat, None, title, vid["link"], thumb, from_user, duration)
             except Exception as er:
                 LOGS.exception(er)
 
 
-def _build_message_link(reply):
-    """Safely build a t.me message link from a Telethon Message object.
-    Falls back to an empty string if the chat ID cannot be resolved
-    (e.g. a forwarded message from a channel the bot hasn't joined).
-    """
-    try:
-        chat_id = reply.chat_id
-        msg_id = reply.id
-        if chat_id and msg_id:
-            # Supergroups / channels have a negative ID starting with -100
-            if str(chat_id).startswith("-100"):
-                peer = str(chat_id)[4:]  # strip -100 prefix
-                return f"https://t.me/c/{peer}/{msg_id}"
-            # For regular groups we can't build a public link, return empty
-        return ""
-    except Exception:
-        return ""
-
-
 async def file_download(event, reply, fast_download=True):
-    thumb = "https://telegra.ph/file/abc578ecc222d28a861ba.mp4"
+    thumb = "https://telegra.ph/file/22bb2349da20c7524e4db.mp4"
     title = reply.file.title or reply.file.name or f"{str(time())}.mp4"
     file = reply.file.name or f"{str(time())}.mp4"
     if fast_download:
         dl = await downloader(
-            os.path.join(DOWNLOAD_DIR, file),
+            f"vcbot/downloads/{file}",
             reply.media.document,
             event,
             time(),
@@ -1594,29 +563,13 @@ async def file_download(event, reply, fast_download=True):
         )
         dl = dl.name
     else:
-        dl = await reply.download_media(os.path.join(DOWNLOAD_DIR, ""))
+        dl = await reply.download_media()
     duration = (
         time_formatter(reply.file.duration * 1000) if reply.file.duration else "🤷‍♂️"
     )
-    # Safely download thumbnail — skip if the message is from an external
-    # channel/group the bot cannot resolve (PeerChannel lookup error).
-    if reply.document and reply.document.thumbs:
-        try:
-            # Pre-resolve the entity so Telethon can look it up before media download.
-            try:
-                await reply.client.get_input_entity(reply.peer_id)
-            except Exception:
-                pass
-            thumb = await reply.download_media(os.path.join(DOWNLOAD_DIR, ""), thumb=-1)
-        except Exception as e:
-            LOGS.debug(f"Thumb download skipped (could not resolve entity): {e}")
-    link = _build_message_link(reply)
-    return dl, thumb, title, link, duration
+    if reply.document.thumbs:
+        thumb = await reply.download_media("vcbot/downloads/", thumb=-1)
+    return dl, thumb, title, reply.message_link, duration
 
 
-# --------------------------------------------------
-
-try:
-    load_queue_from_db()
-except Exception as startup_err:
-    LOGS.error(f"Startup queue load failed: {startup_err}")
+# ------------------------------------------------------------------

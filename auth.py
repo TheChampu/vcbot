@@ -1,3 +1,10 @@
+# Ultroid - UserBot
+# Copyright (C) 2021-2022 TeamUltroid
+#
+# This file is a part of < https://github.com/TeamUltroid/Ultroid/ >
+# PLease read the GNU Affero General Public License in
+# <https://www.github.com/TeamUltroid/Ultroid/blob/main/LICENSE/>.
+
 """
 ✘ Commands Available -
 
@@ -24,7 +31,7 @@ from pyChampu.dB.vc_sudos import add_vcsudo, del_vcsudo, get_vcsudos, is_vcsudo
 from . import vc_asst, owner_and_sudos, get_string, udB
 
 
-@vc_asst("addauth(?: |$)", from_users=owner_and_sudos(), vc_auth=False, allow_all=False)
+@vc_asst("addauth", from_users=owner_and_sudos(), vc_auth=False)
 async def auth_group(event):
     try:
         key = event.text.split(" ", maxsplit=1)[1]
@@ -45,7 +52,7 @@ async def auth_group(event):
     )
 
 
-@vc_asst("remauth(?: |$)", from_users=owner_and_sudos(), vc_auth=False, allow_all=False)
+@vc_asst("remauth", from_users=owner_and_sudos(), vc_auth=False)
 async def auth_group(event):
     chat = event.chat_id
     key = udB.get_key("VC_AUTH_GROUPS") or {}
@@ -60,7 +67,7 @@ async def auth_group(event):
     await event.eor(get_string("vcbot_10"))
 
 
-@vc_asst("listauth(?: |$)", from_users=owner_and_sudos(), vc_auth=False, allow_all=False)
+@vc_asst("listauth", from_users=owner_and_sudos(), vc_auth=False)
 async def listVc(e):
     chats = udB.get_key("VC_AUTH_GROUPS")
     if not chats:
@@ -76,7 +83,7 @@ async def listVc(e):
     await e.eor(text, parse_mode="html")
 
 
-@vc_asst("listvcaccess(?: |$)", from_users=owner_and_sudos(), vc_auth=False, allow_all=False)
+@vc_asst("listvcaccess$", from_users=owner_and_sudos(), vc_auth=False)
 async def _(e):
     xx = await e.eor(get_string("vcbot_11"))
     mm = get_vcsudos()
@@ -91,7 +98,7 @@ async def _(e):
     await xx.edit(pp, parse_mode="html")
 
 
-@vc_asst("rmvcaccess(?: |$)(.*)", from_users=owner_and_sudos(), vc_auth=False, allow_all=False)
+@vc_asst("rmvcaccess( (.*)|$)", from_users=owner_and_sudos(), vc_auth=False)
 async def _(e):
     xx = await e.eor("`Disapproving to access Voice Chat features...`")
     input = e.pattern_match.group(1).strip()
@@ -103,11 +110,12 @@ async def _(e):
             userid = await e.client.parse_id(input)
             name = (await e.client.get_entity(userid)).first_name
         except ValueError as ex:
-            return await xx.eor(f"`{str(ex)}`", time=5)
+            return await xx.edit(f"`{str(ex)}`", time=5)
     else:
-        return await xx.eor(get_string("vcbot_17"), time=3)
+        return await xx.edit(get_string("vcbot_17"), time=3)
     if not is_vcsudo(userid):
         return await xx.eor(
+            xx,
             f"[{name}](tg://user?id={userid})` is not approved to use my Voice Chat Bot.`",
             time=5,
         )
@@ -118,10 +126,10 @@ async def _(e):
             time=5,
         )
     except Exception as ex:
-        return await xx.eor(f"`{ex}`", time=5)
+        return await xx.edit(f"`{ex}`", time=5)
 
 
-@vc_asst("vcaccess(?: |$)(.*)", from_users=owner_and_sudos(), vc_auth=False, allow_all=False)
+@vc_asst("vcaccess( (.*)|$)", from_users=owner_and_sudos(), vc_auth=False)
 async def _(e):
     xx = await e.eor("`Approving to access Voice Chat features...`")
     input = e.pattern_match.group(1).strip()

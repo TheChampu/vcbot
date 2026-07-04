@@ -1,3 +1,10 @@
+# Ultroid - UserBot
+# Copyright (C) 2021-2022 TeamUltroid
+#
+# This file is a part of < https://github.com/TeamUltroid/Ultroid/ >
+# PLease read the GNU Affero General Public License in
+# <https://www.github.com/TeamUltroid/Ultroid/blob/main/LICENSE/>.
+
 """
 ✘ Commands Available
 
@@ -12,7 +19,7 @@ from telethon.errors.rpcerrorlist import ChatSendMediaForbiddenError
 from . import vc_asst, Player, get_string, inline_mention, is_url_ok, mediainfo, vid_download, file_download,LOGS
 
 
-@vc_asst("videoplay(?: |$)")
+@vc_asst("videoplay")
 async def video_c(event):
     xx = await event.eor(get_string("com_1"))
     chat = event.chat_id
@@ -38,10 +45,6 @@ async def video_c(event):
     if not (reply or song):
         return await xx.eor(get_string("vcbot_15"), time=5)
     await xx.eor(get_string("vcbot_20"))
-    ultSongs = Player(chat, xx, True)
-    was_connected = ultSongs.group_call.is_connected
-    if not was_connected and not (await ultSongs.vc_joiner(announce=False)):
-        return
     if reply and reply.media and mediainfo(reply.media).startswith("video"):
         song, thumb, title, link, duration = await file_download(xx, reply)
     else:
@@ -55,11 +58,14 @@ async def video_c(event):
         else:
             song, thumb, title, link, duration = (
                 song,
-                "https://telegra.ph/file/abc578ecc222d28a861ba.mp4",
+                "https://telegra.ph/file/22bb2349da20c7524e4db.mp4",
                 song,
                 song,
                 "♾",
             )
+    ultSongs = Player(chat, xx, True)
+    if not (await ultSongs.vc_joiner()):
+        return
     text = "🎸 **Now playing:** [{}]({})\n⏰ **Duration:** `{}`\n👥 **Chat:** `{}`\n🙋‍♂ **Requested by:** {}".format(
         title, link, duration, chat, from_user
     )

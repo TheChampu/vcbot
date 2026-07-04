@@ -1,3 +1,10 @@
+# Ultroid - UserBot
+# Copyright (C) 2021-2022 TeamUltroid
+#
+# This file is a part of < https://github.com/TeamUltroid/Ultroid/ >
+# PLease read the GNU Affero General Public License in
+# <https://www.github.com/TeamUltroid/Ultroid/blob/main/LICENSE/>.
+
 """
 ✘ Commands Available -
 
@@ -6,9 +13,6 @@
 
 • `{i}leavevc`
    Leave the voice chat.
-
-• `{i}stop` or `{i}end`
-    Stop current VC playback and leave voice chat.
 
 • `{i}rejoin`
    Re-join the voice chat, incase of errors.
@@ -20,16 +24,12 @@
    Skip the current song and play the next in queue, if any.
 """
 
-try:
-    from pytgcalls.exceptions import NotInCallError as NotConnectedError
-except ImportError:
-    class NotConnectedError(Exception):
-        pass
+from pytgcalls.exceptions import NotConnectedError
 
 from . import vc_asst, Player, get_string,CLIENTS,VIDEO_ON
 
 
-@vc_asst("joinvc(?: |$)")
+@vc_asst("joinvc")
 async def join_(event):
     if len(event.text.split()) > 1:
         chat = event.text.split()[1]
@@ -41,10 +41,10 @@ async def join_(event):
         chat = event.chat_id
     ultSongs = Player(chat, event)
     if not ultSongs.group_call.is_connected:
-        await ultSongs.vc_joiner(announce=True)
+        await ultSongs.vc_joiner()
 
 
-@vc_asst("(leavevc|stop|end)(?: |$)")
+@vc_asst("(leavevc|stopvc)")
 async def leaver(event):
     if len(event.text.split()) > 1:
         chat = event.text.split()[1]
@@ -55,9 +55,6 @@ async def leaver(event):
     else:
         chat = event.chat_id
     ultSongs = Player(chat)
-    if not ultSongs.group_call.is_connected:
-        return await event.eor(get_string("vcbot_6"))
-    ultSongs.group_call._current_track_skipped = True
     await ultSongs.group_call.stop()
     if CLIENTS.get(chat):
         del CLIENTS[chat]
@@ -66,7 +63,7 @@ async def leaver(event):
     await event.eor(get_string("vcbot_1"))
 
 
-@vc_asst("rejoin(?: |$)")
+@vc_asst("rejoin")
 async def rejoiner(event):
     if len(event.text.split()) > 1:
         chat = event.text.split()[1]
@@ -77,8 +74,6 @@ async def rejoiner(event):
     else:
         chat = event.chat_id
     ultSongs = Player(chat)
-    if not ultSongs.group_call.is_connected:
-        return await event.eor(get_string("vcbot_6"))
     try:
         await ultSongs.group_call.reconnect()
     except NotConnectedError:
@@ -86,7 +81,7 @@ async def rejoiner(event):
     await event.eor(get_string("vcbot_5"))
 
 
-@vc_asst("volume(?: |$)")
+@vc_asst("volume")
 async def volume_setter(event):
     if len(event.text.split()) <= 1:
         return await event.eor(get_string("vcbot_4"))
@@ -103,8 +98,6 @@ async def volume_setter(event):
         chat = event.chat_id
     if vol:
         ultSongs = Player(chat)
-        if not ultSongs.group_call.is_connected:
-            return await event.eor(get_string("vcbot_6"))
         await ultSongs.group_call.set_my_volume(int(vol))
         if vol > 200:
             vol = 200
@@ -113,7 +106,7 @@ async def volume_setter(event):
         return await event.eor(get_string("vcbot_3").format(vol))
 
 
-@vc_asst("skip(?: |$)")
+@vc_asst("skip")
 async def skipper(event):
     if len(event.text.split()) > 1:
         chat = event.text.split()[1]
@@ -124,7 +117,4 @@ async def skipper(event):
     else:
         chat = event.chat_id
     ultSongs = Player(chat, event)
-    if not ultSongs.group_call.is_connected:
-        return await event.eor(get_string("vcbot_6"))
-    ultSongs.group_call._current_track_skipped = True
     await ultSongs.play_from_queue()
