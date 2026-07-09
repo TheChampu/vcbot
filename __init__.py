@@ -9,6 +9,12 @@ from traceback import format_exc
 # ------------------------------------------------------------------
 # PyTgCalls Version Detection & Dynamic Imports
 # ------------------------------------------------------------------
+from pyChampu import HNDLR, LOGS, asst, udB, vcClient
+from telethon.errors.rpcerrorlist import (
+    ParticipantJoinMissingError,
+    ChatSendMediaForbiddenError,
+)
+
 PYTGCALLS_V3 = False
 
 try:
@@ -37,12 +43,6 @@ except ImportError:
     except ImportError:
         NoActiveGroupCall = Exception
         NotInCallError = Exception
-
-from telethon.errors.rpcerrorlist import (
-    ParticipantJoinMissingError,
-    ChatSendMediaForbiddenError,
-)
-from pyChampu import HNDLR, LOGS, asst, udB, vcClient
 from pyChampu._misc._decorators import compile_pattern
 from pyChampu.fns.helper import (
     bash,
