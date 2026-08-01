@@ -175,6 +175,9 @@ def _register_stream_handler() -> None:
             return
 
         source   = VC_STREAM_FILES.get(chat_id, "")
+        if source and ("silence.mp3" in source or "SoundHelix" in source):
+            return
+
         callback = VC_PLAYOUT_CALLBACKS.get(chat_id)
         if callback:
             try:
@@ -252,7 +255,10 @@ class GroupCallWrapper:
         # pytgcalls v3 requires an active stream to join the call.
         # We play a very short public silence MP3; the StreamEnded event fires
         # immediately and play_from_queue() takes over.
-        silence = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3"
+        silence = os.path.join(os.getcwd(), "resources", "silence.mp3")
+        if not os.path.exists(silence):
+            silence = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3"
+        VC_STREAM_FILES[chat_id] = silence
         try:
             await pytgcalls_client.play(
                 chat_id,
