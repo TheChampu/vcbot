@@ -157,10 +157,21 @@ def _register_stream_handler() -> None:
         return
 
     @pytgcalls_client.on_update()
-    async def _on_stream_ended(update):
+    async def _on_stream_ended(*args, **kwargs):
+        if len(args) == 2:
+            _, update = args
+        elif len(args) == 1:
+            update = args[0]
+        else:
+            update = kwargs.get("update")
+
         if not isinstance(update, StreamEnded):
             return
-        chat_id = update.chat_id
+
+        chat_id = getattr(update, "chat_id", None)
+        if not chat_id:
+            return
+
         source   = VC_STREAM_FILES.get(chat_id, "")
         callback = VC_PLAYOUT_CALLBACKS.get(chat_id)
         if callback:
