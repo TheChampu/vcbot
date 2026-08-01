@@ -547,6 +547,24 @@ class Player:
                     parse_mode="html",
                 )
             return True
+
+        # If VC account is not in the group, auto-invite it using the main userbot client
+        if vcClient and hasattr(vcClient, "me") and vcClient.me:
+            try:
+                from pyChampu import Champu_bot
+                await Champu_bot(
+                    functions.channels.InviteToChannelRequest(
+                        channel=chat_id,
+                        users=[vcClient.me.id],
+                    )
+                )
+                await asyncio.sleep(1)
+                done, err = await self.startCall()
+                if done:
+                    return True
+            except Exception as inv_err:
+                LOGS.debug(f"Auto-invite VC account note: {inv_err}")
+
         with suppress(Exception):
             await vcClient.send_message(
                 self._current_chat,
