@@ -638,15 +638,42 @@ async def get_from_queue(chat_id: int):
 # ──────────────────────────────────────────────────────────────────────────────
 
 async def get_stream_link(ytlink: str) -> str:
-    """Return the best-audio direct stream URL via yt-dlp."""
+    """Return the best-audio direct stream URL via YoutubeDL Python API or yt-dlp CLI."""
+    if YoutubeDL is not None:
+        try:
+            loop = asyncio.get_event_loop()
+            def _extract():
+                ydl_opts = {
+                    "format": "bestaudio/best",
+                    "quiet": True,
+                    "no_warnings": True,
+                    "nocheckcertificate": True,
+                }
+                with YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(ytlink, download=False)
+                    if info:
+                        if info.get("url"):
+                            return info["url"]
+                        formats = info.get("formats", [])
+                        audio_formats = [f for f in formats if f.get("acodec") != "none"]
+                        if audio_formats:
+                            return audio_formats[-1]["url"]
+                        if formats:
+                            return formats[-1]["url"]
+                    return None
+            stream_url = await loop.run_in_executor(None, _extract)
+            if stream_url:
+                return stream_url
+        except Exception as ex:
+            LOGS.warning(f"YoutubeDL Python extraction failed for {ytlink}: {ex}")
+
     out, _ = await bash(
-        f'yt-dlp -g -f "bestaudio[ext=m4a]/bestaudio/best" -- "{ytlink}"'
+        f'yt-dlp -g -f "bestaudio/best" --no-warnings --no-check-certificates -- "{ytlink}"'
     )
-    # yt-dlp may output multiple lines (e.g. for HLS); take the first non-empty one
     lines = [l.strip() for l in (out or "").splitlines() if l.strip()]
-    if not lines:
-        raise RuntimeError(f"yt-dlp returned no stream URL for: {ytlink}")
-    return lines[0]
+    if lines:
+        return lines[0]
+    raise RuntimeError(f"yt-dlp returned no stream URL for: {ytlink}")
 
 
 async def download(query: str):
