@@ -670,6 +670,12 @@ async def get_stream_link(ytlink: str) -> str:
                     "quiet": True,
                     "no_warnings": True,
                     "nocheckcertificate": True,
+                    "geo_bypass": True,
+                    "extractor_args": {
+                        "youtube": {
+                            "player_client": ["android", "ios", "mweb", "web"]
+                        }
+                    },
                 }
                 with YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(ytlink, download=False)
@@ -690,7 +696,7 @@ async def get_stream_link(ytlink: str) -> str:
             LOGS.warning(f"YoutubeDL Python extraction failed for {ytlink}: {ex}")
 
     out, _ = await bash(
-        f'yt-dlp -g -f "bestaudio/best" --no-warnings --no-check-certificates -- "{ytlink}"'
+        f'yt-dlp -g -f "bestaudio/best" --no-warnings --no-check-certificates --extractor-args "youtube:player_client=android,ios" -- "{ytlink}"'
     )
     lines = [l.strip() for l in (out or "").splitlines() if l.strip()]
     if lines:
