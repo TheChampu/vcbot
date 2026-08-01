@@ -214,13 +214,22 @@ class GroupCallWrapper:
     # ── Stream builders ────────────────────────────────────────────────────
 
     def _audio_stream(self, path: str) -> "MediaStream":
+        ff_params = (
+            "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 "
+            "-ss 0 -probesize 10000000 -analyzeduration 10000000"
+        )
         return MediaStream(
             path,
             audio_parameters=AudioQuality.HIGH,
             video_flags=MediaStream.Flags.IGNORE,
+            ffmpeg_parameters=ff_params if path.startswith("http") else None,
         )
 
     def _video_stream(self, path: str, with_audio: bool = True) -> "MediaStream":
+        ff_params = (
+            "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 "
+            "-ss 0 -probesize 10000000 -analyzeduration 10000000"
+        )
         return MediaStream(
             path,
             audio_parameters=AudioQuality.HIGH,
@@ -229,6 +238,7 @@ class GroupCallWrapper:
                 MediaStream.Flags.AUTO_DETECT if with_audio
                 else MediaStream.Flags.IGNORE
             ),
+            ffmpeg_parameters=ff_params if path.startswith("http") else None,
         )
 
     # ── Call control ────────────────────────────────────────────────────────
@@ -498,15 +508,16 @@ class Player:
                 link_preview=False,
                 parse_mode="html",
             )
-        except ChatSendMediaForbiddenError:
-            msg = await vcClient.send_message(
-                self._current_chat,
-                text,
-                link_preview=False,
-                parse_mode="html",
-            )
         except Exception:
-            msg = None
+            try:
+                msg = await vcClient.send_message(
+                    self._current_chat,
+                    text,
+                    link_preview=False,
+                    parse_mode="html",
+                )
+            except Exception:
+                msg = None
 
         if msg:
             MSGID_CACHE[chat_id] = msg

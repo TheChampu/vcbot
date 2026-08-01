@@ -76,8 +76,8 @@ async def video_c(event):
             file=thumb,
             link_preview=False,
         )
-    except ChatSendMediaForbiddenError:
-        await xx.reply(text, link_preview=False)
-    await xx.delete()
+        await xx.delete()
+    except Exception:
+        await xx.eor(text, link_preview=False)
     # Switch stream to video (replaces silent join stream)
     await ultSongs.group_call.start_video(song, with_audio=True)

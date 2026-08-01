@@ -90,8 +90,8 @@ async def play_music_(event):
                 parse_mode="html",
             )
             await xx.delete()
-        except ChatSendMediaForbiddenError:
-            await xx.eor(text, link_preview=False)
+        except Exception:
+            await xx.eor(text, link_preview=False, parse_mode="html")
         if thumb and os.path.exists(thumb):
             os.remove(thumb)
     else:
@@ -161,7 +161,7 @@ async def play_music_(event):
                     link_preview=False,
                     parse_mode="html",
                 )
-            except ChatSendMediaForbiddenError:
+            except Exception:
                 await msg.reply(text, link_preview=False, parse_mode="html")
             if thumb and os.path.exists(thumb):
                 os.remove(thumb)
@@ -226,13 +226,12 @@ async def live_stream(e):
     ultSongs = Player(chat, e)
     if not ultSongs.group_call.is_connected and not (await ultSongs.vc_joiner()):
         return
-    from_user = inline_mention(e.sender)
-    await xx.reply(
-        "🎸 **Now playing:** [{}]({})\n⏰ **Duration:** `{}`\n👥 **Chat:** `{}`\n🙋‍♂ **Requested by:** {}".format(
-            title, link, duration, chat, from_user
-        ),
-        file=thumb,
-        link_preview=False,
+    text = "🎸 **Now playing:** [{}]({})\n⏰ **Duration:** `{}`\n👥 **Chat:** `{}`\n🙋‍♂ **Requested by:** {}".format(
+        title, link, duration, chat, from_user
     )
-    await xx.delete()
+    try:
+        await xx.reply(text, file=thumb, link_preview=False)
+        await xx.delete()
+    except Exception:
+        await xx.eor(text, link_preview=False)
     await ultSongs.group_call.start_audio(file)

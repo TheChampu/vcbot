@@ -46,15 +46,14 @@ async def live_stream(e):
         if not (await ultSongs.vc_joiner()):
             return
         from_user = inline_mention(e.sender, html=True)
-        await xx.reply(
-            "🎸 **Now playing:** [{}]({})\n⏰ **Duration:** `{}`\n👥 **Chat:** `{}`\n🙋‍♂ **Requested by:** {}".format(
-                f"{title[:30]}...", link, duration, chat, from_user
-            ),
-            file=thumb,
-            link_preview=False,
+        text = "🎸 **Now playing:** [{}]({})\n⏰ **Duration:** `{}`\n👥 **Chat:** `{}`\n🙋‍♂ **Requested by:** {}".format(
+            f"{title[:30]}...", link, duration, chat, from_user
         )
-
-        await xx.delete()
+        try:
+            await xx.reply(text, file=thumb, link_preview=False)
+            await xx.delete()
+        except Exception:
+            await xx.eor(text, link_preview=False)
         await ultSongs.group_call.start_audio(file)
     else:
         from_user = inline_mention(e)
