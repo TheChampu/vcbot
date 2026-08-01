@@ -6,6 +6,8 @@ import traceback
 from contextlib import suppress
 from time import time
 from traceback import format_exc
+from urllib.parse import quote
+import httpx
 
 # ──────────────────────────────────────────────────────────────────────────────
 # PyTgCalls v3 — (py-tgcalls >= 2.0 ships v3 API)
@@ -659,14 +661,26 @@ async def get_from_queue(chat_id: int):
 # Download / stream helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
-async def get_stream_link(ytlink: str) -> str:
-    """Return the best-audio direct stream URL via YoutubeDL Python API or yt-dlp CLI."""
+async def get_stream_link(ytlink: str, video: bool = False) -> str:
+    """Return direct playable stream URL via Shruti API, YoutubeDL Python API, or yt-dlp CLI."""
+    # 1. Try Shruti API (Server-side stream bypass API)
+    try:
+        api_type = "video" if video else "audio"
+        api_stream_url = f"{API_URL.rstrip('/')}/download?url={quote(ytlink)}&type={api_type}&api_key={API_KEY}"
+        async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
+            resp = await client.get(api_stream_url, headers={"Range": "bytes=0-100"})
+            if resp.status_code in (200, 206):
+                return api_stream_url
+    except Exception as api_err:
+        LOGS.warning(f"Shruti API stream fetch note: {api_err}")
+
+    # 2. Try YoutubeDL Python API with mobile player clients
     if YoutubeDL is not None:
         try:
             loop = asyncio.get_event_loop()
             def _extract():
                 ydl_opts = {
-                    "format": "bestaudio/best",
+                    "format": "bestvideo+bestaudio/best" if video else "bestaudio/best",
                     "quiet": True,
                     "no_warnings": True,
                     "nocheckcertificate": True,
@@ -695,8 +709,10 @@ async def get_stream_link(ytlink: str) -> str:
         except Exception as ex:
             LOGS.warning(f"YoutubeDL Python extraction failed for {ytlink}: {ex}")
 
+    # 3. Fallback to CLI yt-dlp
+    fmt = "bestvideo+bestaudio/best" if video else "bestaudio/best"
     out, _ = await bash(
-        f'yt-dlp -g -f "bestaudio/best" --no-warnings --no-check-certificates --extractor-args "youtube:player_client=android,ios" -- "{ytlink}"'
+        f'yt-dlp -g -f "{fmt}" --no-warnings --no-check-certificates --extractor-args "youtube:player_client=android,ios" -- "{ytlink}"'
     )
     lines = [l.strip() for l in (out or "").splitlines() if l.strip()]
     if lines:
@@ -717,7 +733,7 @@ async def download(query: str):
     title  = data["title"]
     dur    = data.get("duration") or "♾"
     thumb  = f"https://i.ytimg.com/vi/{data['id']}/hqdefault.jpg"
-    dl     = await get_stream_link(link)
+    dl     = await get_stream_link(link, video=False)
     return dl, thumb, title, link, dur
 
 
@@ -728,7 +744,7 @@ async def vid_download(query: str):
     search = VideosSearch(query, limit=1).result()
     data   = search["result"][0]
     link   = data["link"]
-    video  = await get_stream_link(link)
+    video  = await get_stream_link(link, video=True)
     title  = data["title"]
     thumb  = f"https://i.ytimg.com/vi/{data['id']}/hqdefault.jpg"
     dur    = data.get("duration") or "♾"
