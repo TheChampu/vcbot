@@ -64,6 +64,7 @@ async def video_c(event):
                 "♾",
             )
     ultSongs = Player(chat, xx, True)
+    # Start call first (join VC), then immediately switch to video stream
     if not (await ultSongs.vc_joiner()):
         return
     text = "🎸 **Now playing:** [{}]({})\n⏰ **Duration:** `{}`\n👥 **Chat:** `{}`\n🙋‍♂ **Requested by:** {}".format(
@@ -77,6 +78,6 @@ async def video_c(event):
         )
     except ChatSendMediaForbiddenError:
         await xx.reply(text, link_preview=False)
-    await asyncio.sleep(1)
-    await ultSongs.group_call.start_video(song, with_audio=True)
     await xx.delete()
+    # Switch stream to video (replaces silent join stream)
+    await ultSongs.group_call.start_video(song, with_audio=True)

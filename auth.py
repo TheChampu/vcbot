@@ -32,7 +32,7 @@ from . import vc_asst, owner_and_sudos, get_string, udB
 
 
 @vc_asst("addauth", from_users=owner_and_sudos(), vc_auth=False)
-async def auth_group(event):
+async def _add_auth_group(event):
     try:
         key = event.text.split(" ", maxsplit=1)[1]
         admins = "admins" in key
@@ -53,7 +53,7 @@ async def auth_group(event):
 
 
 @vc_asst("remauth", from_users=owner_and_sudos(), vc_auth=False)
-async def auth_group(event):
+async def _rem_auth_group(event):
     chat = event.chat_id
     key = udB.get_key("VC_AUTH_GROUPS") or {}
     gc = key.get(chat)
