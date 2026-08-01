@@ -10,6 +10,16 @@ from traceback import format_exc
 # ──────────────────────────────────────────────────────────────────────────────
 # PyTgCalls v3 — (py-tgcalls >= 2.0 ships v3 API)
 # ──────────────────────────────────────────────────────────────────────────────
+import sys
+import pyrogram
+import pyrogram.errors
+
+if not hasattr(pyrogram.errors, "GroupcallForbidden"):
+    class GroupcallForbidden(Exception):
+        pass
+    pyrogram.errors.GroupcallForbidden = GroupcallForbidden
+    sys.modules["pyrogram.errors"].GroupcallForbidden = GroupcallForbidden
+
 from pyChampu import HNDLR, LOGS, asst, udB, vcClient
 from telethon.errors.rpcerrorlist import (
     ParticipantJoinMissingError,
@@ -102,15 +112,33 @@ VC_PLAYOUT_CALLBACKS: dict = {}   # {chat_id: async callback(call, source, mtype
 VC_STREAM_FILES:      dict = {}   # {chat_id: current_file_path}
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Initialise PyTgCalls client
+# Initialise PyTgCalls client (Native Pyrogram Backend)
 # ──────────────────────────────────────────────────────────────────────────────
 pytgcalls_client = None
+pyro_vc_client = None
 
-if vcClient is not None and PyTgCalls is not None:
+if PyTgCalls is not None:
     try:
-        pytgcalls_client = PyTgCalls(vcClient)
-        pytgcalls_client.start()
-        LOGS.info("PyTgCalls client started successfully.")
+        from pyChampu.configs import Var
+        vc_sess = Var.VC_SESSION or udB.get_key("VC_SESSION") or Var.SESSION
+        if vc_sess and isinstance(vc_sess, str):
+            try:
+                pyro_vc_client = pyrogram.Client(
+                    "ChampuVCBot",
+                    api_id=Var.API_ID,
+                    api_hash=Var.API_HASH,
+                    session_string=vc_sess,
+                    in_memory=True,
+                )
+                pytgcalls_client = PyTgCalls(pyro_vc_client)
+                pytgcalls_client.start()
+                LOGS.info("PyTgCalls client started successfully with native Pyrogram backend.")
+            except Exception as _pyro_err:
+                LOGS.warning(f"Native Pyrogram VC client init note: {_pyro_err}. Trying vcClient fallback...")
+                if vcClient is not None:
+                    pytgcalls_client = PyTgCalls(vcClient)
+                    pytgcalls_client.start()
+                    LOGS.info("PyTgCalls client started successfully with vcClient fallback.")
     except RuntimeError as _rterr:
         # Already-started warning from internal thread — safe to ignore
         LOGS.warning(f"PyTgCalls start note (ignored): {_rterr}")
