@@ -151,7 +151,15 @@ if PyTgCalls is not None:
                     pytgcalls_clients[acc_id] = tg_client
                     LOGS.info(f"PyTgCalls multi-client [{acc_id}] started successfully.")
                 except Exception as _p_err:
-                    LOGS.warning(f"PyTgCalls init note for [{acc_id}]: {_p_err}")
+                    LOGS.warning(f"PyTgCalls init failed for [{acc_id}]: {_p_err}. Auto-deleting expired session from DB.")
+                    try:
+                        from assistant.vcsession_manager import save_vc_sessions_db
+                        sessions.pop(acc_id, None)
+                        save_vc_sessions_db(sessions)
+                        if acc_id == "acc1":
+                            udB.del_key("VC_SESSION")
+                    except Exception as _pop_err:
+                        LOGS.debug(f"Auto-delete session note: {_pop_err}")
 
         # Set default pyro_vc_client and pytgcalls_client for backward compatibility
         if "acc1" in pytgcalls_clients:
