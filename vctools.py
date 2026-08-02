@@ -101,7 +101,8 @@ async def replayer(event):
     await event.eor("`Re-playing the current song.`")
 
 
-from pyChampu import champu_cmd, udB, HNDLR
+from pyChampu import udB, HNDLR
+from pyChampu._misc._decorators import champu_cmd
 
 
 @champu_cmd(pattern="vcsession( (.*)|$)", fullsudo=True)
