@@ -116,37 +116,93 @@ VC_STREAM_FILES:      dict = {}   # {chat_id: current_file_path}
 # ──────────────────────────────────────────────────────────────────────────────
 # Initialise PyTgCalls client (Native Pyrogram Backend)
 # ──────────────────────────────────────────────────────────────────────────────
+pytgcalls_clients = {}
+pyro_vc_clients = {}
 pytgcalls_client = None
 pyro_vc_client = None
 
 if PyTgCalls is not None:
     try:
         from pyChampu.configs import Var
-        vc_sess = Var.VC_SESSION or udB.get_key("VC_SESSION") or Var.SESSION
-        if vc_sess and isinstance(vc_sess, str):
+        from assistant.vcsession_manager import get_vc_sessions_db
+
+        sessions = get_vc_sessions_db()
+
+        # Fallback to legacy VC_SESSION if no dictionary present
+        if not sessions:
+            legacy_sess = Var.VC_SESSION or udB.get_key("VC_SESSION") or Var.SESSION
+            if legacy_sess:
+                sessions["acc1"] = {"name": "VC Assistant 1", "session": legacy_sess, "enabled": True}
+
+        for acc_id, acc_data in sessions.items():
+            sess_str = acc_data.get("session")
+            if sess_str and isinstance(sess_str, str):
+                try:
+                    p_client = pyrogram.Client(
+                        f"ChampuVCBot_{acc_id}",
+                        api_id=Var.API_ID,
+                        api_hash=Var.API_HASH,
+                        session_string=sess_str,
+                        in_memory=True,
+                    )
+                    tg_client = PyTgCalls(p_client)
+                    tg_client.start()
+                    pyro_vc_clients[acc_id] = p_client
+                    pytgcalls_clients[acc_id] = tg_client
+                    LOGS.info(f"PyTgCalls multi-client [{acc_id}] started successfully.")
+                except Exception as _p_err:
+                    LOGS.warning(f"PyTgCalls init note for [{acc_id}]: {_p_err}")
+
+        # Set default pyro_vc_client and pytgcalls_client for backward compatibility
+        if "acc1" in pytgcalls_clients:
+            pytgcalls_client = pytgcalls_clients["acc1"]
+            pyro_vc_client = pyro_vc_clients.get("acc1")
+        elif pytgcalls_clients:
+            first_key = list(pytgcalls_clients.keys())[0]
+            pytgcalls_client = pytgcalls_clients[first_key]
+            pyro_vc_client = pyro_vc_clients.get(first_key)
+        elif vcClient is not None:
             try:
-                pyro_vc_client = pyrogram.Client(
-                    "ChampuVCBot",
-                    api_id=Var.API_ID,
-                    api_hash=Var.API_HASH,
-                    session_string=vc_sess,
-                    in_memory=True,
-                )
-                pytgcalls_client = PyTgCalls(pyro_vc_client)
+                pytgcalls_client = PyTgCalls(vcClient)
                 pytgcalls_client.start()
-                LOGS.info("PyTgCalls client started successfully with native Pyrogram backend.")
-            except Exception as _pyro_err:
-                LOGS.warning(f"Native Pyrogram VC client init note: {_pyro_err}. Trying vcClient fallback...")
-                if vcClient is not None:
-                    pytgcalls_client = PyTgCalls(vcClient)
-                    pytgcalls_client.start()
-                    LOGS.info("PyTgCalls client started successfully with vcClient fallback.")
-    except RuntimeError as _rterr:
-        # Already-started warning from internal thread — safe to ignore
-        LOGS.warning(f"PyTgCalls start note (ignored): {_rterr}")
+            except Exception as _fallback_err:
+                LOGS.warning(f"PyTgCalls main fallback start note: {_fallback_err}")
+
     except Exception as _pytgcalls_err:
-        LOGS.exception(f"PyTgCalls client start failed: {_pytgcalls_err}")
-        pytgcalls_client = None
+        LOGS.exception(f"PyTgCalls multi-client pool start note: {_pytgcalls_err}")
+
+
+async def get_best_vc_client(chat_id):
+    """
+    Dynamically picks the best VC client for a group chat:
+    1. Checks enabled VC Assistant accounts (acc1, acc2...).
+    2. If an enabled account is a member of chat_id -> uses its PyTgCalls client.
+    3. If no enabled assistant is in chat_id or toggled OFF -> uses Main Account PyTgCalls client.
+    """
+    try:
+        from assistant.vcsession_manager import get_vc_sessions_db
+        sessions = get_vc_sessions_db()
+
+        for acc_id, acc_data in sessions.items():
+            if not acc_data.get("enabled", True):
+                continue  # Bypassed / Turned OFF
+
+            tg_call = pytgcalls_clients.get(acc_id)
+            p_client = pyro_vc_clients.get(acc_id)
+
+            if tg_call and p_client:
+                try:
+                    if hasattr(p_client, "me") and p_client.me:
+                        member = await p_client.get_chat_member(chat_id, p_client.me.id)
+                        if member:
+                            return tg_call, p_client
+                except Exception:
+                    pass
+    except Exception as ex:
+        LOGS.debug(f"get_best_vc_client note: {ex}")
+
+    # Fallback to default/main client
+    return pytgcalls_client, pyro_vc_client or vcClient
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -213,6 +269,15 @@ class GroupCallWrapper:
         """No-op — connectivity is tracked via ACTIVE_CALLS."""
         pass
 
+    async def get_tg_call(self):
+        try:
+            tg_call, _ = await get_best_vc_client(self._chat_id)
+            if tg_call:
+                return tg_call
+        except Exception:
+            pass
+        return pytgcalls_client
+
     def on_playout_ended(self, callback) -> None:
         VC_PLAYOUT_CALLBACKS[self._chat_id] = callback
 
@@ -249,18 +314,13 @@ class GroupCallWrapper:
     # ── Call control ────────────────────────────────────────────────────────
 
     async def join(self, chat_id: int) -> None:
-        """Join the voice chat (silent — no user-facing audio)."""
-        if pytgcalls_client is None:
-            raise RuntimeError("PyTgCalls client not initialised (no VC session).")
-        # pytgcalls v3 requires an active stream to join the call.
-        # We play a very short public silence MP3; the StreamEnded event fires
-        # immediately and play_from_queue() takes over.
-        silence = os.path.join(os.getcwd(), "resources", "silence.mp3")
-        if not os.path.exists(silence):
-            silence = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3"
-        VC_STREAM_FILES[chat_id] = silence
+        """Join (or create) a voice chat using 1s silent audio."""
+        tg_call = await self.get_tg_call()
+        if tg_call is None:
+            raise RuntimeError("PyTgCalls client not initialised.")
+        silence = _ensure_silence_file()
         try:
-            await pytgcalls_client.play(
+            await tg_call.play(
                 chat_id,
                 MediaStream(
                     silence,
@@ -275,12 +335,13 @@ class GroupCallWrapper:
 
     async def start_audio(self, path: str) -> None:
         """Start (or switch to) streaming audio from *path* (file or URL)."""
-        if pytgcalls_client is None:
+        tg_call = await self.get_tg_call()
+        if tg_call is None:
             raise RuntimeError("PyTgCalls client not initialised.")
         VC_STREAM_FILES[self._chat_id] = path
         stream = self._audio_stream(path)
         try:
-            await pytgcalls_client.play(self._chat_id, stream)
+            await tg_call.play(self._chat_id, stream)
             if self._chat_id not in ACTIVE_CALLS:
                 ACTIVE_CALLS.append(self._chat_id)
         except Exception as e:
