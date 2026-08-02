@@ -134,7 +134,7 @@ if PyTgCalls is not None:
             if legacy_sess:
                 sessions["acc1"] = {"name": "VC Assistant 1", "session": legacy_sess, "enabled": True}
 
-        for acc_id, acc_data in sessions.items():
+        for acc_id, acc_data in list(sessions.items()):
             sess_str = acc_data.get("session")
             if sess_str and isinstance(sess_str, str):
                 try:
