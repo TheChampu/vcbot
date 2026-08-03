@@ -714,6 +714,12 @@ def vc_asst(dec, **kwargs):
         vc_auth = kwargs.pop("vc_auth", True)
 
         async def vc_handler(e):
+            if not e.out:
+                text = getattr(e, "text", "") or ""
+                valid_sudo_prefixes = [p for p in [SUDO_HNDLR, vc_hndlr] if p]
+                if HNDLR and HNDLR not in valid_sudo_prefixes:
+                    if text.startswith(HNDLR) and not any(text.startswith(p) for p in valid_sudo_prefixes):
+                        return
             key    = udB.get_key("VC_AUTH_GROUPS") or {}
             VCAUTH = list(key.keys())
             if not (
