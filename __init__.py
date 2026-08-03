@@ -113,17 +113,25 @@ CLIENTS:      dict = {}           # {chat_id: GroupCallWrapper}
 VC_PLAYOUT_CALLBACKS: dict = {}   # {chat_id: async callback(call, source, mtype)}
 VC_STREAM_FILES:      dict = {}   # {chat_id: current_file_path}
 
-SILENCE_FILE = "etc/silence.raw"
+import wave
+
+SILENCE_FILE = "etc/silence.wav"
 
 
 def _ensure_silence_file() -> str:
-    """Ensure a 1-second silent PCM audio file exists and return its file path."""
+    """Ensure a 1-second valid silent WAV audio file exists and return its file path."""
     path = SILENCE_FILE
-    if os.path.isfile(path) and os.path.getsize(path) > 0:
+    if os.path.isfile(path) and os.path.getsize(path) > 44:
         return path
     os.makedirs("etc", exist_ok=True)
-    with open(path, "wb") as f:
-        f.write(b"\x00" * 192000)
+    try:
+        with wave.open(path, "wb") as wf:
+            wf.setnchannels(2)
+            wf.setsampwidth(2)
+            wf.setframerate(48000)
+            wf.writeframes(b"\x00" * (48000 * 2 * 2))
+    except Exception as e:
+        LOGS.exception(f"Error creating silence.wav: {e}")
     return path
 
 # ──────────────────────────────────────────────────────────────────────────────
