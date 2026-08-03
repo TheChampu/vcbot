@@ -113,6 +113,19 @@ CLIENTS:      dict = {}           # {chat_id: GroupCallWrapper}
 VC_PLAYOUT_CALLBACKS: dict = {}   # {chat_id: async callback(call, source, mtype)}
 VC_STREAM_FILES:      dict = {}   # {chat_id: current_file_path}
 
+SILENCE_FILE = "etc/silence.raw"
+
+
+def _ensure_silence_file() -> str:
+    """Ensure a 1-second silent PCM audio file exists and return its file path."""
+    path = SILENCE_FILE
+    if os.path.isfile(path) and os.path.getsize(path) > 0:
+        return path
+    os.makedirs("etc", exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(b"\x00" * 192000)
+    return path
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Initialise PyTgCalls client (Native Pyrogram Backend)
 # ──────────────────────────────────────────────────────────────────────────────
