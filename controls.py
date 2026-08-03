@@ -11,8 +11,8 @@
 • `{i}joinvc <optional chat id/username>`
    Join the voice chat.
 
-• `{i}leavevc`
-   Leave the voice chat.
+• `{i}end` / `{i}endvc` / `{i}leavevc` / `{i}stopvc`
+   End song playback, clear queue, and leave the voice chat.
 
 • `{i}rejoin`
    Re-join the voice chat, incase of errors.
@@ -24,7 +24,7 @@
    Skip the current song and play the next in queue, if any.
 """
 
-from . import vc_asst, Player, get_string, CLIENTS, VIDEO_ON, NotInCallError as NotConnectedError
+from . import vc_asst, Player, get_string, CLIENTS, VIDEO_ON, VC_QUEUE, NotInCallError as NotConnectedError
 
 
 @vc_asst("joinvc")
@@ -42,7 +42,7 @@ async def join_(event):
         await ultSongs.vc_joiner()
 
 
-@vc_asst("(leavevc|stopvc)")
+@vc_asst("(end|endvc|leavevc|stopvc)")
 async def leaver(event):
     if len(event.text.split()) > 1:
         chat = event.text.split()[1]
@@ -52,13 +52,15 @@ async def leaver(event):
             return await event.eor(get_string("vcbot_2").format(str(e)))
     else:
         chat = event.chat_id
+    VC_QUEUE.pop(chat, None)
+    VC_QUEUE.pop(int(chat), None)
     ultSongs = Player(chat)
     await ultSongs.group_call.stop()
     if CLIENTS.get(chat):
         del CLIENTS[chat]
     if VIDEO_ON.get(chat):
         del VIDEO_ON[chat]
-    await event.eor(get_string("vcbot_1"))
+    await event.eor("🛑 **Ended playback & left Voice Chat!**")
 
 
 @vc_asst("rejoin")

@@ -22,7 +22,7 @@ if not hasattr(pyrogram.errors, "GroupcallForbidden"):
     pyrogram.errors.GroupcallForbidden = GroupcallForbidden
     sys.modules["pyrogram.errors"].GroupcallForbidden = GroupcallForbidden
 
-from pyChampu import HNDLR, LOGS, asst, udB, vcClient
+from pyChampu import HNDLR, SUDO_HNDLR, LOGS, asst, udB, vcClient
 from telethon.errors.rpcerrorlist import (
     ParticipantJoinMissingError,
     ChatSendMediaForbiddenError,
@@ -399,13 +399,14 @@ class GroupCallWrapper:
 
     async def start_video(self, path: str, with_audio: bool = True) -> None:
         """Start (or switch to) streaming video from *path*."""
-        if pytgcalls_client is None:
+        tg_call = await self.get_tg_call()
+        if tg_call is None:
             raise RuntimeError("PyTgCalls client not initialised.")
         VC_STREAM_FILES[self._chat_id] = path
         VC_STREAM_START_TIME[self._chat_id] = time()
         stream = self._video_stream(path, with_audio=with_audio)
         try:
-            await pytgcalls_client.play(self._chat_id, stream)
+            await tg_call.play(self._chat_id, stream)
             if self._chat_id not in ACTIVE_CALLS:
                 ACTIVE_CALLS.append(self._chat_id)
         except Exception as e:
@@ -414,9 +415,10 @@ class GroupCallWrapper:
 
     async def stop(self) -> None:
         """Leave voice chat and clean up all state for this chat."""
-        if pytgcalls_client is not None:
+        tg_call = await self.get_tg_call()
+        if tg_call is not None:
             with suppress(Exception):
-                await pytgcalls_client.leave_call(self._chat_id)
+                await tg_call.leave_call(self._chat_id)
         if self._chat_id in ACTIVE_CALLS:
             ACTIVE_CALLS.remove(self._chat_id)
         VC_PLAYOUT_CALLBACKS.pop(self._chat_id, None)
@@ -428,36 +430,47 @@ class GroupCallWrapper:
         VIDEO_ON.pop(self._chat_id, None)
 
     async def set_my_volume(self, volume: int) -> None:
-        if pytgcalls_client is None:
+        tg_call = await self.get_tg_call()
+        if tg_call is None:
             return
         volume = max(1, min(200, volume))
         with suppress(Exception):
-            await pytgcalls_client.change_volume_call(self._chat_id, volume)
+            await tg_call.change_volume_call(self._chat_id, volume)
 
     async def set_is_mute(self, muted: bool) -> None:
-        if pytgcalls_client is None:
+        tg_call = await self.get_tg_call()
+        if tg_call is None:
             return
         with suppress(Exception):
             if muted:
-                await pytgcalls_client.mute(self._chat_id)
+                await tg_call.mute(self._chat_id)
             else:
-                await pytgcalls_client.unmute(self._chat_id)
+                await tg_call.unmute(self._chat_id)
 
     async def set_pause(self, paused: bool) -> None:
-        if pytgcalls_client is None:
+        tg_call = await self.get_tg_call()
+        if tg_call is None:
             return
         with suppress(Exception):
             if paused:
-                await pytgcalls_client.pause(self._chat_id)
+                await tg_call.pause(self._chat_id)
             else:
-                await pytgcalls_client.resume(self._chat_id)
+                await tg_call.resume(self._chat_id)
 
     async def reconnect(self) -> None:
         """Re-join the voice chat (used by .rejoin)."""
-        if pytgcalls_client is None:
+        tg_call = await self.get_tg_call()
+        if tg_call is None:
             raise NotInCallError("PyTgCalls client not initialised.")
         with suppress(Exception):
-            await pytgcalls_client.leave_call(self._chat_id)
+            await tg_call.leave_call(self._chat_id)
+        if self._chat_id in ACTIVE_CALLS:
+            ACTIVE_CALLS.remove(self._chat_id)
+        path = VC_STREAM_FILES.get(self._chat_id)
+        if path:
+            await self.start_audio(path)
+        else:
+            await self.join(self._chat_id)
         if self._chat_id in ACTIVE_CALLS:
             ACTIVE_CALLS.remove(self._chat_id)
         path = VC_STREAM_FILES.get(self._chat_id)
@@ -695,8 +708,9 @@ def vc_asst(dec, **kwargs):
         kwargs["func"] = (
             lambda e: not e.is_private and not e.via_bot_id and not e.fwd_from
         )
-        handler = udB.get_key("VC_HNDLR") or HNDLR
-        kwargs["pattern"] = compile_pattern(dec, handler)
+        vc_hndlr = udB.get_key("VC_HNDLR")
+        handler_list = list(dict.fromkeys([h for h in [vc_hndlr, HNDLR, SUDO_HNDLR] if h]))
+        kwargs["pattern"] = compile_pattern(dec, handler_list)
         vc_auth = kwargs.pop("vc_auth", True)
 
         async def vc_handler(e):
@@ -863,7 +877,11 @@ async def download(query: str):
 
     if VideosSearch is None:
         raise ImportError("'youtube-search-python' not installed.")
-    search = VideosSearch(query, limit=1).result()
+    
+    loop = asyncio.get_event_loop()
+    search = await loop.run_in_executor(None, lambda: VideosSearch(query, limit=1).result())
+    if not search or not search.get("result"):
+        raise ValueError(f"No search results for: {query}")
     data   = search["result"][0]
     link   = data["link"]
     title  = data["title"]
@@ -877,7 +895,10 @@ async def vid_download(query: str):
     """Search YouTube for a video and return stream info."""
     if VideosSearch is None:
         raise ImportError("'youtube-search-python' not installed.")
-    search = VideosSearch(query, limit=1).result()
+    loop = asyncio.get_event_loop()
+    search = await loop.run_in_executor(None, lambda: VideosSearch(query, limit=1).result())
+    if not search or not search.get("result"):
+        raise ValueError(f"No video search results for: {query}")
     data   = search["result"][0]
     link   = data["link"]
     video  = await get_stream_link(link, video=True)
@@ -897,7 +918,8 @@ async def dl_playlist(chat: int, from_user: str, link: str):
         raise ImportError("'youtube-search-python' not installed.")
 
     # First item — returned to caller for immediate play
-    search = VideosSearch(links[0], limit=1).result()
+    loop = asyncio.get_event_loop()
+    search = await loop.run_in_executor(None, lambda: VideosSearch(links[0], limit=1).result())
     vid1   = search["result"][0]
     song   = await get_stream_link(vid1["link"])
     thumb  = f"https://i.ytimg.com/vi/{vid1['id']}/hqdefault.jpg"
@@ -908,7 +930,7 @@ async def dl_playlist(chat: int, from_user: str, link: str):
     async def _enqueue_rest():
         for z in links[1:]:
             with suppress(Exception):
-                s = VideosSearch(z, limit=1).result()
+                s = await loop.run_in_executor(None, lambda: VideosSearch(z, limit=1).result())
                 v = s["result"][0]
                 add_to_queue(
                     chat, None,
