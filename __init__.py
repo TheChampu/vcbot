@@ -112,6 +112,7 @@ CLIENTS:      dict = {}           # {chat_id: GroupCallWrapper}
 
 VC_PLAYOUT_CALLBACKS: dict = {}   # {chat_id: async callback(call, source, mtype)}
 VC_STREAM_FILES:      dict = {}   # {chat_id: current_file_path}
+VC_STREAM_START_TIME: dict = {}   # {chat_id: float_timestamp}
 
 import wave
 
@@ -146,41 +147,48 @@ if PyTgCalls is not None:
     try:
         from pyChampu.configs import Var
         from assistant.vcsession_manager import get_vc_sessions_db
+        from pyChampu import ChampuClient
 
         sessions = get_vc_sessions_db()
 
-        # Fallback to legacy VC_SESSION if no dictionary present
-        if not sessions:
-            legacy_sess = Var.VC_SESSION or udB.get_key("VC_SESSION") or Var.SESSION
-            if legacy_sess:
-                sessions["acc1"] = {"name": "VC Assistant 1", "session": legacy_sess, "enabled": True}
+        # If VC_SESSION string is set, ensure it exists in sessions
+        vc_session_str = udB.get_key("VC_SESSION")
+        if vc_session_str and "acc1" not in sessions:
+            sessions["acc1"] = {
+                "session": vc_session_str,
+                "name": "Default VC Assistant",
+                "enabled": True,
+            }
 
         for acc_id, acc_data in list(sessions.items()):
-            sess_str = acc_data.get("session")
-            if sess_str and isinstance(sess_str, str):
+            session_str = acc_data.get("session")
+            if not session_str:
+                continue
+
+            p_client = ChampuClient(
+                session=f"vc_assistant_{acc_id}",
+                session_string=session_str,
+                api_id=Var.API_ID,
+                api_hash=Var.API_HASH,
+                in_memory=True,
+            )
+            try:
+                p_client.start()
+                tg_client = PyTgCalls(p_client)
+                tg_client.start()
+                pyro_vc_clients[acc_id] = p_client
+                pytgcalls_clients[acc_id] = tg_client
+                LOGS.info(f"PyTgCalls multi-client [{acc_id}] started successfully.")
+            except Exception as _p_err:
+                LOGS.warning(f"PyTgCalls init failed for [{acc_id}]: {_p_err}. Auto-deleting expired session from DB.")
                 try:
-                    p_client = pyrogram.Client(
-                        f"ChampuVCBot_{acc_id}",
-                        api_id=Var.API_ID,
-                        api_hash=Var.API_HASH,
-                        session_string=sess_str,
-                        in_memory=True,
-                    )
-                    tg_client = PyTgCalls(p_client)
-                    tg_client.start()
-                    pyro_vc_clients[acc_id] = p_client
-                    pytgcalls_clients[acc_id] = tg_client
-                    LOGS.info(f"PyTgCalls multi-client [{acc_id}] started successfully.")
-                except Exception as _p_err:
-                    LOGS.warning(f"PyTgCalls init failed for [{acc_id}]: {_p_err}. Auto-deleting expired session from DB.")
-                    try:
-                        from assistant.vcsession_manager import save_vc_sessions_db
-                        sessions.pop(acc_id, None)
-                        save_vc_sessions_db(sessions)
-                        if acc_id == "acc1":
-                            udB.del_key("VC_SESSION")
-                    except Exception as _pop_err:
-                        LOGS.debug(f"Auto-delete session note: {_pop_err}")
+                    from assistant.vcsession_manager import save_vc_sessions_db
+                    sessions.pop(acc_id, None)
+                    save_vc_sessions_db(sessions)
+                    if acc_id == "acc1":
+                        udB.del_key("VC_SESSION")
+                except Exception as _pop_err:
+                    LOGS.debug(f"Auto-delete session note: {_pop_err}")
 
         # Set default pyro_vc_client and pytgcalls_client for backward compatibility
         if "acc1" in pytgcalls_clients:
@@ -238,39 +246,48 @@ async def get_best_vc_client(chat_id):
 # StreamEnded handler
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _register_stream_handler() -> None:
-    """Attach the StreamEnded handler to the global pytgcalls client."""
-    if pytgcalls_client is None or StreamEnded is None:
+def _register_stream_handler(client_instance=None) -> None:
+    target_client = client_instance or pytgcalls_client
+    if target_client is None or StreamEnded is None:
         return
 
-    @pytgcalls_client.on_update()
-    async def _on_stream_ended(*args, **kwargs):
-        if len(args) == 2:
-            _, update = args
-        elif len(args) == 1:
-            update = args[0]
-        else:
-            update = kwargs.get("update")
+    try:
+        @target_client.on_update()
+        async def _on_stream_ended(*args, **kwargs):
+            if len(args) == 2:
+                _, update = args
+            elif len(args) == 1:
+                update = args[0]
+            else:
+                update = kwargs.get("update")
 
-        if not isinstance(update, StreamEnded):
-            return
+            if not isinstance(update, StreamEnded):
+                return
 
-        chat_id = getattr(update, "chat_id", None)
-        if not chat_id:
-            return
+            chat_id = getattr(update, "chat_id", None)
+            if not chat_id:
+                return
 
-        source   = VC_STREAM_FILES.get(chat_id, "")
-        if source and ("silence.mp3" in source or "SoundHelix" in source):
-            return
+            source = VC_STREAM_FILES.get(chat_id, "")
+            start_t = VC_STREAM_START_TIME.get(chat_id, 0)
+            elapsed = time() - start_t
 
-        callback = VC_PLAYOUT_CALLBACKS.get(chat_id)
-        if callback:
-            try:
-                await callback(None, source, None)
-            except Exception as _cb_err:
-                LOGS.exception(f"Playout callback error (chat {chat_id}): {_cb_err}")
+            # Ignore silence audio finish events or premature end events (within 5 seconds of stream start)
+            if not source or "silence" in str(source).lower() or "soundhelix" in str(source).lower() or elapsed < 5.0:
+                return
+
+            callback = VC_PLAYOUT_CALLBACKS.get(chat_id)
+            if callback:
+                try:
+                    await callback(None, source, None)
+                except Exception as _cb_err:
+                    LOGS.exception(f"Playout callback error (chat {chat_id}): {_cb_err}")
+    except Exception as er:
+        LOGS.debug(f"_register_stream_handler error: {er}")
 
 _register_stream_handler()
+for _cl in pytgcalls_clients.values():
+    _register_stream_handler(_cl)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -348,6 +365,8 @@ class GroupCallWrapper:
         if tg_call is None:
             raise RuntimeError("PyTgCalls client not initialised.")
         silence = _ensure_silence_file()
+        VC_STREAM_FILES[chat_id] = silence
+        VC_STREAM_START_TIME[chat_id] = time()
         try:
             await tg_call.play(
                 chat_id,
@@ -368,6 +387,7 @@ class GroupCallWrapper:
         if tg_call is None:
             raise RuntimeError("PyTgCalls client not initialised.")
         VC_STREAM_FILES[self._chat_id] = path
+        VC_STREAM_START_TIME[self._chat_id] = time()
         stream = self._audio_stream(path)
         try:
             await tg_call.play(self._chat_id, stream)
@@ -382,6 +402,7 @@ class GroupCallWrapper:
         if pytgcalls_client is None:
             raise RuntimeError("PyTgCalls client not initialised.")
         VC_STREAM_FILES[self._chat_id] = path
+        VC_STREAM_START_TIME[self._chat_id] = time()
         stream = self._video_stream(path, with_audio=with_audio)
         try:
             await pytgcalls_client.play(self._chat_id, stream)
@@ -400,6 +421,7 @@ class GroupCallWrapper:
             ACTIVE_CALLS.remove(self._chat_id)
         VC_PLAYOUT_CALLBACKS.pop(self._chat_id, None)
         VC_STREAM_FILES.pop(self._chat_id, None)
+        VC_STREAM_START_TIME.pop(self._chat_id, None)
 
     async def stop_video(self) -> None:
         """Stop the video portion; audio continues."""
