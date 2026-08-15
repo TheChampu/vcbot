@@ -56,7 +56,7 @@ async def live_stream(e):
             await xx.eor(text, link_preview=False)
         await ultSongs.group_call.start_audio(file)
     else:
-        from_user = inline_mention(e)
+        from_user = inline_mention(e.sender, html=True)
         add_to_queue(chat, file, title, link, thumb, from_user, duration)
         return await xx.eor(
             f"▶ Added 🎵 **[{title}]({link})** to queue at #{list(VC_QUEUE[chat].keys())[-1]}.",

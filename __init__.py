@@ -579,87 +579,129 @@ class Player:
         await self.play_from_queue()
 
     async def play_from_queue(self) -> None:
-        chat_id = self._chat
+        chat_id = int(self._chat)
         # Stop video mode if active
         if chat_id in VIDEO_ON:
             with suppress(Exception):
                 await self.group_call.stop_video()
             VIDEO_ON.pop(chat_id, None)
 
-        try:
-            song, title, link, thumb, from_user, pos, dur = await get_from_queue(chat_id)
-        except (IndexError, KeyError):
+        played_successfully = False
+        while VC_QUEUE.get(chat_id):
+            try:
+                pos = list(VC_QUEUE[chat_id].keys())[0]
+                info = VC_QUEUE[chat_id][pos]
+            except (IndexError, KeyError):
+                break
+
+            song = info.get("song")
+            link = info.get("link", "")
+            title = info.get("title", "Unknown")
+            thumb = info.get("thumb")
+            from_user = info.get("from_user", "User")
+            dur = info.get("duration", "♾")
+
+            if not song and link:
+                try:
+                    song = await get_stream_link(link)
+                except Exception as ex:
+                    LOGS.error(f"Stream resolution error for pos #{pos} ({title}): {ex}")
+                    # Pop broken song from queue to avoid deadlock loop
+                    with suppress(Exception):
+                        VC_QUEUE[chat_id].pop(pos)
+                        if not VC_QUEUE[chat_id]:
+                            VC_QUEUE.pop(chat_id, None)
+                    with suppress(Exception):
+                        await vcClient.send_message(
+                            self._current_chat,
+                            f"⚠️ <strong>Stream Error:</strong> Could not extract stream link for <a href={link}>{title}</a>.\n<i>Skipping to next song...</i>",
+                            parse_mode="html",
+                        )
+                    continue
+
+            if not song:
+                # Remove unplayable item
+                with suppress(Exception):
+                    VC_QUEUE[chat_id].pop(pos)
+                    if not VC_QUEUE[chat_id]:
+                        VC_QUEUE.pop(chat_id, None)
+                continue
+
+            # Start the song
+            try:
+                await self.group_call.start_audio(song)
+            except ParticipantJoinMissingError:
+                if await self.vc_joiner():
+                    with suppress(Exception):
+                        await self.group_call.start_audio(song)
+            except Exception as er:
+                LOGS.exception(f"Audio start error for #{pos}: {er}")
+                with suppress(Exception):
+                    VC_QUEUE[chat_id].pop(pos)
+                    if not VC_QUEUE[chat_id]:
+                        VC_QUEUE.pop(chat_id, None)
+                with suppress(Exception):
+                    await vcClient.send_message(
+                        self._current_chat,
+                        f"⚠️ <strong>Playback Error:</strong> Failed to play <a href={link}>{title}</a>.\n<i>Skipping...</i>",
+                        parse_mode="html",
+                    )
+                continue
+
+            # Delete previous "now playing" message
+            if chat_id in MSGID_CACHE:
+                with suppress(Exception):
+                    await MSGID_CACHE[chat_id].delete()
+                del MSGID_CACHE[chat_id]
+
+            # Send new "now playing" message
+            text = (
+                f"<strong>🎧 Now playing #{pos}: <a href={link}>{title}</a>"
+                f"\n⏰ Duration:</strong> <code>{dur}</code>"
+                f"\n👤 <strong>Requested by:</strong> {from_user}"
+            )
+            try:
+                msg = await vcClient.send_message(
+                    self._current_chat,
+                    text,
+                    file=thumb,
+                    link_preview=False,
+                    parse_mode="html",
+                )
+            except Exception:
+                try:
+                    msg = await vcClient.send_message(
+                        self._current_chat,
+                        text,
+                        link_preview=False,
+                        parse_mode="html",
+                    )
+                except Exception:
+                    msg = None
+
+            if msg:
+                MSGID_CACHE[chat_id] = msg
+
+            # Remove played item from queue
+            with suppress(Exception):
+                VC_QUEUE[chat_id].pop(pos)
+                if not VC_QUEUE[chat_id]:
+                    VC_QUEUE.pop(chat_id, None)
+
+            played_successfully = True
+            break
+
+        if not played_successfully and not VC_QUEUE.get(chat_id):
             # Queue exhausted — leave the voice chat cleanly
             with suppress(Exception):
                 await self.group_call.stop()
-            CLIENTS.pop(self._chat, None)
+            CLIENTS.pop(chat_id, None)
             with suppress(Exception):
                 await vcClient.send_message(
                     self._current_chat,
                     f"🎵 Queue finished. Left VC: <code>{chat_id}</code>",
                     parse_mode="html",
                 )
-            return
-        except Exception as er:
-            LOGS.exception(er)
-            with suppress(Exception):
-                await vcClient.send_message(
-                    self._current_chat,
-                    f"<strong>VC Queue Error:</strong> <code>{format_exc()}</code>",
-                    parse_mode="html",
-                )
-            return
-
-        # Start the next song
-        try:
-            await self.group_call.start_audio(song)
-        except ParticipantJoinMissingError:
-            await self.vc_joiner()
-            with suppress(Exception):
-                await self.group_call.start_audio(song)
-        except Exception as er:
-            LOGS.exception(er)
-            return
-
-        # Delete previous "now playing" message
-        if chat_id in MSGID_CACHE:
-            with suppress(Exception):
-                await MSGID_CACHE[chat_id].delete()
-            del MSGID_CACHE[chat_id]
-
-        # Send new "now playing" message
-        text = (
-            f"<strong>🎧 Now playing #{pos}: <a href={link}>{title}</a>"
-            f"\n⏰ Duration:</strong> <code>{dur}</code>"
-            f"\n👤 <strong>Requested by:</strong> {from_user}"
-        )
-        try:
-            msg = await vcClient.send_message(
-                self._current_chat,
-                text,
-                file=thumb,
-                link_preview=False,
-                parse_mode="html",
-            )
-        except Exception:
-            try:
-                msg = await vcClient.send_message(
-                    self._current_chat,
-                    text,
-                    link_preview=False,
-                    parse_mode="html",
-                )
-            except Exception:
-                msg = None
-
-        if msg:
-            MSGID_CACHE[chat_id] = msg
-
-        # Remove played item from queue
-        with suppress(Exception):
-            VC_QUEUE[chat_id].pop(pos)
-            if not VC_QUEUE[chat_id]:
-                VC_QUEUE.pop(chat_id)
 
     async def vc_joiner(self) -> bool:
         chat_id = self._chat
@@ -818,7 +860,10 @@ async def get_from_queue(chat_id: int):
 # ──────────────────────────────────────────────────────────────────────────────
 
 async def get_stream_link(ytlink: str, video: bool = False) -> str:
-    """Return direct playable stream URL via Shruti API, YoutubeDL Python API, or yt-dlp CLI."""
+    """Return direct playable stream URL via Shruti API, YoutubeDL Python API, or yt-dlp CLI (with download fallback)."""
+    if os.path.exists(ytlink):
+        return ytlink
+
     # 1. Try Shruti API (Server-side stream bypass API)
     try:
         api_type = "video" if video else "audio"
@@ -830,7 +875,7 @@ async def get_stream_link(ytlink: str, video: bool = False) -> str:
     except Exception as api_err:
         LOGS.warning(f"Shruti API stream fetch note: {api_err}")
 
-    # 2. Try YoutubeDL Python API with mobile player clients
+    # 2. Try YoutubeDL Python API with varied player clients
     if YoutubeDL is not None:
         try:
             loop = asyncio.get_event_loop()
@@ -843,7 +888,7 @@ async def get_stream_link(ytlink: str, video: bool = False) -> str:
                     "geo_bypass": True,
                     "extractor_args": {
                         "youtube": {
-                            "player_client": ["android", "ios", "mweb", "web"]
+                            "player_client": ["android", "ios", "mweb", "web", "tv"]
                         }
                     },
                 }
@@ -865,15 +910,36 @@ async def get_stream_link(ytlink: str, video: bool = False) -> str:
         except Exception as ex:
             LOGS.warning(f"YoutubeDL Python extraction failed for {ytlink}: {ex}")
 
-    # 3. Fallback to CLI yt-dlp
+    # 3. Fallback to CLI yt-dlp -g
     fmt = "bestvideo+bestaudio/best" if video else "bestaudio/best"
     out, _ = await bash(
-        f'yt-dlp -g -f "{fmt}" --no-warnings --no-check-certificates --extractor-args "youtube:player_client=android,ios" -- "{ytlink}"'
+        f'yt-dlp -g -f "{fmt}" --no-warnings --no-check-certificates --extractor-args "youtube:player_client=android,mweb,ios" -- "{ytlink}"'
     )
     lines = [l.strip() for l in (out or "").splitlines() if l.strip()]
     if lines:
         return lines[0]
-    raise RuntimeError(f"yt-dlp returned no stream URL for: {ytlink}")
+
+    # Try yt-dlp -g without extractor args
+    out_alt, _ = await bash(
+        f'yt-dlp -g -f "{fmt}" --no-warnings --no-check-certificates -- "{ytlink}"'
+    )
+    lines_alt = [l.strip() for l in (out_alt or "").splitlines() if l.strip()]
+    if lines_alt:
+        return lines_alt[0]
+
+    # 4. Final Fallback: Download audio locally into downloads/ if stream extraction fails
+    os.makedirs("downloads", exist_ok=True)
+    out_dl, err_dl = await bash(
+        f'yt-dlp -f "bestaudio/best" --no-warnings --no-check-certificates --no-playlist -o "downloads/vc_%(id)s.%(ext)s" -- "{ytlink}"'
+    )
+    # Search for downloaded file matching pattern
+    for f in os.listdir("downloads"):
+        if f.startswith("vc_"):
+            filepath = os.path.join("downloads", f)
+            if os.path.isfile(filepath) and os.path.getsize(filepath) > 1000:
+                return filepath
+
+    raise RuntimeError(f"yt-dlp returned no stream URL and download failed for: {ytlink}")
 
 
 async def download(query: str):

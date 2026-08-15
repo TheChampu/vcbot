@@ -66,7 +66,10 @@ async def play_music_(event):
     if reply and reply.media and mediainfo(reply.media).startswith(("audio", "video")):
         song, thumb, song_name, link, duration = await file_download(xx, reply)
     else:
-        song, thumb, song_name, link, duration = await download(song)
+        try:
+            song, thumb, song_name, link, duration = await download(song)
+        except Exception as er:
+            return await xx.eor(f"**Download Error:**\n`{str(er)}`")
         if len(link.strip().split()) > 1:
             link = link.strip().split()
     ultSongs = Player(chat, event)
@@ -222,10 +225,14 @@ async def live_stream(e):
         is_live_vid = (await bash(f'yt-dlp -j "{song}" | jq ".is_live"'))[0]
     if is_live_vid != "true":
         return await xx.eor(f"Only Live Youtube Urls supported!\n{song}")
-    file, thumb, title, link, duration = await download(song)
+    try:
+        file, thumb, title, link, duration = await download(song)
+    except Exception as er:
+        return await xx.eor(f"**Live Download Error:**\n`{str(er)}`")
     ultSongs = Player(chat, e)
     if not ultSongs.group_call.is_connected and not (await ultSongs.vc_joiner()):
         return
+    from_user = inline_mention(e.sender, html=True)
     text = "🎸 **Now playing:** [{}]({})\n⏰ **Duration:** `{}`\n👥 **Chat:** `{}`\n🙋‍♂ **Requested by:** {}".format(
         title, link, duration, chat, from_user
     )

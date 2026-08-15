@@ -52,14 +52,12 @@ async def leaver(event):
             return await event.eor(get_string("vcbot_2").format(str(e)))
     else:
         chat = event.chat_id
+    chat = int(chat)
     VC_QUEUE.pop(chat, None)
-    VC_QUEUE.pop(int(chat), None)
     ultSongs = Player(chat)
     await ultSongs.group_call.stop()
-    if CLIENTS.get(chat):
-        del CLIENTS[chat]
-    if VIDEO_ON.get(chat):
-        del VIDEO_ON[chat]
+    CLIENTS.pop(chat, None)
+    VIDEO_ON.pop(chat, None)
     await event.eor("🛑 **Ended playback & left Voice Chat!**")
 
 
