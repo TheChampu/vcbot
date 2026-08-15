@@ -94,7 +94,7 @@ API_URL = (
     os.environ.get("SHRUTI_API_URL")
     or os.environ.get("YT_API_URL")
     or udB.get_key("YT_API_URL")
-    or "http://api01.shrutibots.site"
+    or "https://api01.shrutibots.site"
 )
 API_KEY = os.environ.get("SHRUTI_API_KEY", "ShrutiBotsP3A8xKwYFafG6SuSLTIM")
 
@@ -859,23 +859,40 @@ async def get_from_queue(chat_id: int):
 # Download / stream helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _get_cookie_file() -> str:
+    cookies_dir = os.path.join(os.getcwd(), "resources", "cookies")
+    if os.path.isdir(cookies_dir):
+        for f in sorted(os.listdir(cookies_dir)):
+            p = os.path.join(cookies_dir, f)
+            if os.path.isfile(p) and (f.endswith(".txt") or f.endswith(".json")):
+                return p
+    return ""
+
+
 async def get_stream_link(ytlink: str, video: bool = False) -> str:
-    """Return direct playable stream URL via Shruti API, YoutubeDL Python API, or yt-dlp CLI (with download fallback)."""
+    """Return direct playable stream URL via Shruti API, YoutubeDL Python API, or yt-dlp CLI (with cookies & download fallback)."""
     if os.path.exists(ytlink):
         return ytlink
+
+    cookie_file = _get_cookie_file()
+    cookie_cli = f'--cookies "{cookie_file}"' if cookie_file else ""
 
     # 1. Try Shruti API (Server-side stream bypass API)
     try:
         api_type = "video" if video else "audio"
         api_stream_url = f"{API_URL.rstrip('/')}/download?url={quote(ytlink)}&type={api_type}&api_key={API_KEY}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Range": "bytes=0-100",
+        }
         async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
-            resp = await client.get(api_stream_url, headers={"Range": "bytes=0-100"})
+            resp = await client.get(api_stream_url, headers=headers)
             if resp.status_code in (200, 206):
                 return api_stream_url
     except Exception as api_err:
         LOGS.warning(f"Shruti API stream fetch note: {api_err}")
 
-    # 2. Try YoutubeDL Python API with varied player clients
+    # 2. Try YoutubeDL Python API with varied player clients & cookies
     if YoutubeDL is not None:
         try:
             loop = asyncio.get_event_loop()
@@ -888,10 +905,13 @@ async def get_stream_link(ytlink: str, video: bool = False) -> str:
                     "geo_bypass": True,
                     "extractor_args": {
                         "youtube": {
-                            "player_client": ["android", "ios", "mweb", "web", "tv"]
+                            "player_client": ["android", "ios", "mweb", "web_creator", "tv_embedded"]
                         }
                     },
                 }
+                if cookie_file:
+                    ydl_opts["cookiefile"] = cookie_file
+
                 with YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(ytlink, download=False)
                     if info:
@@ -913,7 +933,7 @@ async def get_stream_link(ytlink: str, video: bool = False) -> str:
     # 3. Fallback to CLI yt-dlp -g
     fmt = "bestvideo+bestaudio/best" if video else "bestaudio/best"
     out, _ = await bash(
-        f'yt-dlp -g -f "{fmt}" --no-warnings --no-check-certificates --extractor-args "youtube:player_client=android,mweb,ios" -- "{ytlink}"'
+        f'yt-dlp -g -f "{fmt}" {cookie_cli} --no-warnings --no-check-certificates --extractor-args "youtube:player_client=android,mweb,ios,web_creator" -- "{ytlink}"'
     )
     lines = [l.strip() for l in (out or "").splitlines() if l.strip()]
     if lines:
@@ -921,7 +941,7 @@ async def get_stream_link(ytlink: str, video: bool = False) -> str:
 
     # Try yt-dlp -g without extractor args
     out_alt, _ = await bash(
-        f'yt-dlp -g -f "{fmt}" --no-warnings --no-check-certificates -- "{ytlink}"'
+        f'yt-dlp -g -f "{fmt}" {cookie_cli} --no-warnings --no-check-certificates -- "{ytlink}"'
     )
     lines_alt = [l.strip() for l in (out_alt or "").splitlines() if l.strip()]
     if lines_alt:
@@ -929,12 +949,24 @@ async def get_stream_link(ytlink: str, video: bool = False) -> str:
 
     # 4. Final Fallback: Download audio locally into downloads/ if stream extraction fails
     os.makedirs("downloads", exist_ok=True)
-    out_dl, err_dl = await bash(
-        f'yt-dlp -f "bestaudio/best" --no-warnings --no-check-certificates --no-playlist -o "downloads/vc_%(id)s.%(ext)s" -- "{ytlink}"'
+    import hashlib
+    file_id = hashlib.md5(ytlink.encode()).hexdigest()[:10]
+    out_file = os.path.join("downloads", f"vc_{file_id}.m4a")
+
+    if os.path.exists(out_file) and os.path.getsize(out_file) > 1000:
+        return out_file
+
+    dl_cmd = (
+        f'yt-dlp -f "bestaudio/best" {cookie_cli} --no-warnings --no-check-certificates '
+        f'--no-playlist -o "{out_file}" -- "{ytlink}"'
     )
-    # Search for downloaded file matching pattern
+    await bash(dl_cmd)
+
+    if os.path.exists(out_file) and os.path.getsize(out_file) > 1000:
+        return out_file
+
     for f in os.listdir("downloads"):
-        if f.startswith("vc_"):
+        if f.startswith(f"vc_{file_id}"):
             filepath = os.path.join("downloads", f)
             if os.path.isfile(filepath) and os.path.getsize(filepath) > 1000:
                 return filepath
@@ -947,36 +979,67 @@ async def download(query: str):
     if query.startswith("https://") and "youtube" not in query.lower() and "youtu.be" not in query.lower():
         return query, None, query, query, "Unknown"
 
-    if VideosSearch is None:
-        raise ImportError("'youtube-search-python' not installed.")
-    
-    loop = asyncio.get_event_loop()
-    search = await loop.run_in_executor(None, lambda: VideosSearch(query, limit=1).result())
-    if not search or not search.get("result"):
-        raise ValueError(f"No search results for: {query}")
-    data   = search["result"][0]
-    link   = data["link"]
-    title  = data["title"]
-    dur    = data.get("duration") or "♾"
-    thumb  = f"https://i.ytimg.com/vi/{data['id']}/hqdefault.jpg"
-    dl     = await get_stream_link(link, video=False)
+    link = query
+    title = query
+    thumb = "https://telegra.ph/file/22bb2349da20c7524e4db.mp4"
+    dur = "♾"
+
+    if VideosSearch is not None:
+        try:
+            loop = asyncio.get_event_loop()
+            search = await loop.run_in_executor(None, lambda: VideosSearch(query, limit=1).result())
+            if search and search.get("result"):
+                data = search["result"][0]
+                link = data["link"]
+                title = data["title"]
+                dur = data.get("duration") or "♾"
+                thumb = f"https://i.ytimg.com/vi/{data['id']}/hqdefault.jpg"
+        except Exception as ex:
+            LOGS.warning(f"VideosSearch note for '{query}': {ex}")
+
+    # Fallback to yt-dlp metadata extraction if title is still URL
+    if title == query and ("youtube" in query.lower() or "youtu.be" in query.lower()):
+        cookie_file = _get_cookie_file()
+        cookie_cli = f'--cookies "{cookie_file}"' if cookie_file else ""
+        out_meta, _ = await bash(f'yt-dlp -j {cookie_cli} --no-warnings -- "{query}"')
+        if out_meta:
+            try:
+                import json
+                meta = json.loads(out_meta.splitlines()[0])
+                title = meta.get("title") or title
+                dur = meta.get("duration_string") or dur
+                vid_id = meta.get("id")
+                if vid_id:
+                    thumb = f"https://i.ytimg.com/vi/{vid_id}/hqdefault.jpg"
+                    link = f"https://www.youtube.com/watch?v={vid_id}"
+            except Exception:
+                pass
+
+    dl = await get_stream_link(link, video=False)
     return dl, thumb, title, link, dur
 
 
 async def vid_download(query: str):
     """Search YouTube for a video and return stream info."""
-    if VideosSearch is None:
-        raise ImportError("'youtube-search-python' not installed.")
-    loop = asyncio.get_event_loop()
-    search = await loop.run_in_executor(None, lambda: VideosSearch(query, limit=1).result())
-    if not search or not search.get("result"):
-        raise ValueError(f"No video search results for: {query}")
-    data   = search["result"][0]
-    link   = data["link"]
-    video  = await get_stream_link(link, video=True)
-    title  = data["title"]
-    thumb  = f"https://i.ytimg.com/vi/{data['id']}/hqdefault.jpg"
-    dur    = data.get("duration") or "♾"
+    link = query
+    title = query
+    thumb = "https://telegra.ph/file/22bb2349da20c7524e4db.mp4"
+    dur = "♾"
+
+    if VideosSearch is not None:
+        try:
+            loop = asyncio.get_event_loop()
+            search = await loop.run_in_executor(None, lambda: VideosSearch(query, limit=1).result())
+            if search and search.get("result"):
+                data = search["result"][0]
+                link = data["link"]
+                title = data["title"]
+                dur = data.get("duration") or "♾"
+                thumb = f"https://i.ytimg.com/vi/{data['id']}/hqdefault.jpg"
+        except Exception as ex:
+            LOGS.warning(f"VideosSearch video note for '{query}': {ex}")
+
+    video = await get_stream_link(link, video=True)
     return video, thumb, title, link, dur
 
 
