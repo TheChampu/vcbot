@@ -656,9 +656,11 @@ class Player:
 
             # Send new "now playing" message
             text = (
-                f"<strong>🎧 Now playing #{pos}: <a href={link}>{title}</a>"
-                f"\n⏰ Duration:</strong> <code>{dur}</code>"
-                f"\n👤 <strong>Requested by:</strong> {from_user}"
+                f"<blockquote><b>🎵 NOW PLAYING #{pos} IN VC 🎵</b></blockquote>\n\n"
+                f"<b>🎧 Song Name:</b> <a href=\"{link}\"><b>{title}</b></a>\n"
+                f"<b>⏱️ Duration:</b> <code>{dur}</code>\n"
+                f"<b>👤 Requested By:</b> {from_user}\n\n"
+                "✨ <b>Powered by @TheChampu</b>"
             )
             try:
                 msg = await vcClient.send_message(
@@ -892,7 +894,7 @@ async def get_stream_link(ytlink: str, video: bool = False) -> str:
     except Exception as api_err:
         LOGS.warning(f"Shruti API stream fetch note: {api_err}")
 
-    # 2. Try YoutubeDL Python API with varied player clients & cookies
+    # 2. Try YoutubeDL Python API with verified mobile player clients & cookies
     if YoutubeDL is not None:
         try:
             loop = asyncio.get_event_loop()
@@ -905,7 +907,7 @@ async def get_stream_link(ytlink: str, video: bool = False) -> str:
                     "geo_bypass": True,
                     "extractor_args": {
                         "youtube": {
-                            "player_client": ["android", "ios", "mweb", "web_creator", "tv_embedded"]
+                            "player_client": ["android_vr", "android"]
                         }
                     },
                 }
@@ -930,10 +932,10 @@ async def get_stream_link(ytlink: str, video: bool = False) -> str:
         except Exception as ex:
             LOGS.warning(f"YoutubeDL Python extraction failed for {ytlink}: {ex}")
 
-    # 3. Fallback to CLI yt-dlp -g
+    # 3. Fallback to CLI yt-dlp -g with android_vr,android
     fmt = "bestvideo+bestaudio/best" if video else "bestaudio/best"
     out, _ = await bash(
-        f'yt-dlp -g -f "{fmt}" {cookie_cli} --no-warnings --no-check-certificates --extractor-args "youtube:player_client=android,mweb,ios,web_creator" -- "{ytlink}"'
+        f'yt-dlp -g -f "{fmt}" {cookie_cli} --no-warnings --no-check-certificates --extractor-args "youtube:player_client=android_vr,android" -- "{ytlink}"'
     )
     lines = [l.strip() for l in (out or "").splitlines() if l.strip()]
     if lines:
@@ -947,7 +949,7 @@ async def get_stream_link(ytlink: str, video: bool = False) -> str:
     if lines_alt:
         return lines_alt[0]
 
-    # 4. Final Fallback: Download audio locally into downloads/ if stream extraction fails
+    # 4. Final Fallback: Download audio locally into downloads/ with android_vr client
     os.makedirs("downloads", exist_ok=True)
     import hashlib
     file_id = hashlib.md5(ytlink.encode()).hexdigest()[:10]
@@ -958,6 +960,7 @@ async def get_stream_link(ytlink: str, video: bool = False) -> str:
 
     dl_cmd = (
         f'yt-dlp -f "bestaudio/best" {cookie_cli} --no-warnings --no-check-certificates '
+        f'--extractor-args "youtube:player_client=android_vr,android" '
         f'--no-playlist -o "{out_file}" -- "{ytlink}"'
     )
     await bash(dl_cmd)

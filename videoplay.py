@@ -67,17 +67,23 @@ async def video_c(event):
     # Start call first (join VC), then immediately switch to video stream
     if not (await ultSongs.vc_joiner()):
         return
-    text = "🎸 **Now playing:** [{}]({})\n⏰ **Duration:** `{}`\n👥 **Chat:** `{}`\n🙋‍♂ **Requested by:** {}".format(
-        title, link, duration, chat, from_user
+    text = (
+        "<blockquote><b>🎬 NOW PLAYING VIDEO IN VC 🎬</b></blockquote>\n\n"
+        f"<b>📹 Video Title:</b> <a href=\"{link}\"><b>{title}</b></a>\n"
+        f"<b>⏱️ Duration:</b> <code>{duration}</code>\n"
+        f"<b>💬 Group ID:</b> <code>{chat}</code>\n"
+        f"<b>👤 Requested By:</b> {from_user}\n\n"
+        "✨ <b>Powered by @TheChampu</b>"
     )
     try:
         await xx.reply(
             text,
             file=thumb,
             link_preview=False,
+            parse_mode="html",
         )
         await xx.delete()
     except Exception:
-        await xx.eor(text, link_preview=False)
+        await xx.eor(text, link_preview=False, parse_mode="html")
     # Switch stream to video (replaces silent join stream)
     await ultSongs.group_call.start_video(song, with_audio=True)

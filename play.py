@@ -82,8 +82,13 @@ async def play_music_(event):
             for lin in link[1:]:
                 add_to_queue(chat, song, lin, lin, None, from_user, duration)
             link = song_name = link[0]
-        text = "🎸 <strong>Now playing: <a href={}>{}</a>\n⏰ Duration:</strong> <code>{}</code>\n👥 <strong>Chat:</strong> <code>{}</code>\n🙋‍♂ <strong>Requested by: {}</strong>".format(
-            link, song_name, duration, chat, from_user
+        text = (
+            "<blockquote><b>🎵 NOW PLAYING IN VOICE CHAT 🎵</b></blockquote>\n\n"
+            f"<b>🎧 Song Name:</b> <a href=\"{link}\"><b>{song_name}</b></a>\n"
+            f"<b>⏱️ Duration:</b> <code>{duration}</code>\n"
+            f"<b>💬 Group ID:</b> <code>{chat}</code>\n"
+            f"<b>👤 Requested By:</b> {from_user}\n\n"
+            "✨ <b>Powered by @TheChampu</b>"
         )
         try:
             await xx.reply(
@@ -109,10 +114,15 @@ async def play_music_(event):
                 add_to_queue(chat, song, lin, lin, None, from_user, duration)
             link = song_name = link[0]
         add_to_queue(chat, song, song_name, link, thumb, from_user, duration)
-        return await xx.eor(
-            f"▶ Added 🎵 <a href={link}>{song_name}</a> to queue at #{list(VC_QUEUE[chat].keys())[-1]}.",
-            parse_mode="html",
+        pos = list(VC_QUEUE[chat].keys())[-1]
+        text = (
+            "<blockquote><b>🎶 ADDED TO VC QUEUE 🎶</b></blockquote>\n\n"
+            f"<b>🎧 Song Name:</b> <a href=\"{link}\"><b>{song_name}</b></a>\n"
+            f"<b>⏱️ Duration:</b> <code>{duration}</code>\n"
+            f"<b>📌 Queue Position:</b> <code>#{pos}</code>\n"
+            f"<b>👤 Requested By:</b> {from_user}"
         )
+        return await xx.eor(text, parse_mode="html")
 
 
 @vc_asst("playfrom")
@@ -154,8 +164,13 @@ async def play_music_(event):
             if not (await ultSongs.vc_joiner()):
                 return
             await ultSongs.group_call.start_audio(song)
-            text = "🎸 <strong>Now playing: <a href={}>{}</a>\n⏰ Duration:</strong> <code>{}</code>\n👥 <strong>Chat:</strong> <code>{}</code>\n🙋‍♂ <strong>Requested by: {}</strong>".format(
-                link, song_name, duration, chat, from_user
+            text = (
+                "<blockquote><b>🎵 NOW PLAYING IN VOICE CHAT 🎵</b></blockquote>\n\n"
+                f"<b>🎧 Song Name:</b> <a href=\"{link}\"><b>{song_name}</b></a>\n"
+                f"<b>⏱️ Duration:</b> <code>{duration}</code>\n"
+                f"<b>💬 Group ID:</b> <code>{chat}</code>\n"
+                f"<b>👤 Requested By:</b> {from_user}\n\n"
+                "✨ <b>Powered by @TheChampu</b>"
             )
             try:
                 await msg.reply(
