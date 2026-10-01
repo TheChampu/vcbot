@@ -1000,6 +1000,33 @@ async def download(query: str):
         except Exception as ex:
             LOGS.warning(f"VideosSearch note for '{query}': {ex}")
 
+    # Fallback to yt-dlp search if link is still not a valid URL
+    if not (link.startswith("http://") or link.startswith("https://")):
+        cookie_file = _get_cookie_file()
+        cookie_cli = f'--cookies "{cookie_file}"' if cookie_file else ""
+        out_meta, _ = await bash(f'yt-dlp -j {cookie_cli} --no-warnings --no-check-certificates "ytsearch1:{query}"')
+        if out_meta:
+            try:
+                import json
+                meta = json.loads(out_meta.splitlines()[0])
+                title = meta.get("title") or title
+                dur = meta.get("duration_string") or dur
+                vid_id = meta.get("id")
+                if vid_id:
+                    thumb = f"https://i.ytimg.com/vi/{vid_id}/hqdefault.jpg"
+                    link = f"https://www.youtube.com/watch?v={vid_id}"
+            except Exception as ex:
+                LOGS.warning(f"yt-dlp search parse failed: {ex}")
+
+        if not (link.startswith("http://") or link.startswith("https://")):
+            try:
+                from pyChampu.fns.ytdl import get_yt_link
+                fallback_url = await asyncio.to_thread(get_yt_link, query)
+                if fallback_url:
+                    link = fallback_url
+            except Exception as ex:
+                LOGS.warning(f"get_yt_link fallback failed: {ex}")
+
     # Fallback to yt-dlp metadata extraction if title is still URL
     if title == query and ("youtube" in query.lower() or "youtu.be" in query.lower()):
         cookie_file = _get_cookie_file()
@@ -1042,6 +1069,33 @@ async def vid_download(query: str):
         except Exception as ex:
             LOGS.warning(f"VideosSearch video note for '{query}': {ex}")
 
+    # Fallback to yt-dlp search if link is still not a valid URL
+    if not (link.startswith("http://") or link.startswith("https://")):
+        cookie_file = _get_cookie_file()
+        cookie_cli = f'--cookies "{cookie_file}"' if cookie_file else ""
+        out_meta, _ = await bash(f'yt-dlp -j {cookie_cli} --no-warnings --no-check-certificates "ytsearch1:{query}"')
+        if out_meta:
+            try:
+                import json
+                meta = json.loads(out_meta.splitlines()[0])
+                title = meta.get("title") or title
+                dur = meta.get("duration_string") or dur
+                vid_id = meta.get("id")
+                if vid_id:
+                    thumb = f"https://i.ytimg.com/vi/{vid_id}/hqdefault.jpg"
+                    link = f"https://www.youtube.com/watch?v={vid_id}"
+            except Exception as ex:
+                LOGS.warning(f"yt-dlp video search parse failed: {ex}")
+
+        if not (link.startswith("http://") or link.startswith("https://")):
+            try:
+                from pyChampu.fns.ytdl import get_yt_link
+                fallback_url = await asyncio.to_thread(get_yt_link, query)
+                if fallback_url:
+                    link = fallback_url
+            except Exception as ex:
+                LOGS.warning(f"get_yt_link fallback failed: {ex}")
+
     video = await get_stream_link(link, video=True)
     return video, thumb, title, link, dur
 
@@ -1057,29 +1111,40 @@ async def dl_playlist(chat: int, from_user: str, link: str):
 
     # First item — returned to caller for immediate play
     loop = asyncio.get_event_loop()
-    search = await loop.run_in_executor(None, lambda: VideosSearch(links[0], limit=1).result())
-    vid1   = search["result"][0]
-    song   = await get_stream_link(vid1["link"])
-    thumb  = f"https://i.ytimg.com/vi/{vid1['id']}/hqdefault.jpg"
-    dur    = vid1.get("duration") or "♾"
-    title  = vid1["title"]
+    try:
+        search = await loop.run_in_executor(None, lambda: VideosSearch(links[0], limit=1).result())
+        vid1   = search["result"][0]
+        song   = await get_stream_link(vid1["link"])
+        thumb  = f"https://i.ytimg.com/vi/{vid1['id']}/hqdefault.jpg"
+        dur    = vid1.get("duration") or "♾"
+        title  = vid1["title"]
+        vlink  = vid1["link"]
+    except Exception:
+        song   = await get_stream_link(links[0])
+        thumb  = "https://telegra.ph/file/22bb2349da20c7524e4db.mp4"
+        dur    = "♾"
+        title  = "YouTube Playlist Video"
+        vlink  = links[0]
 
     # Remaining items — enqueue in background
     async def _enqueue_rest():
         for z in links[1:]:
-            with suppress(Exception):
+            try:
                 s = await loop.run_in_executor(None, lambda: VideosSearch(z, limit=1).result())
                 v = s["result"][0]
-                add_to_queue(
-                    chat, None,
-                    v["title"], v["link"],
-                    f"https://i.ytimg.com/vi/{v['id']}/hqdefault.jpg",
-                    from_user,
-                    v.get("duration") or "♾",
-                )
+                t = v["title"]
+                l = v["link"]
+                th = f"https://i.ytimg.com/vi/{v['id']}/hqdefault.jpg"
+                d = v.get("duration") or "♾"
+            except Exception:
+                t = "YouTube Playlist Video"
+                l = z
+                th = "https://telegra.ph/file/22bb2349da20c7524e4db.mp4"
+                d = "♾"
+            add_to_queue(chat, None, t, l, th, from_user, d)
     asyncio.create_task(_enqueue_rest())
 
-    return song, thumb, title, vid1["link"], dur
+    return song, thumb, title, vlink, dur
 
 
 async def file_download(event, reply, fast_download: bool = True):
