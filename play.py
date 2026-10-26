@@ -72,6 +72,23 @@ async def play_music_(event):
             return await xx.eor(f"**Download Error:**\n`{str(er)}`")
         if len(link.strip().split()) > 1:
             link = link.strip().split()
+
+    # ─── Private 1:1 Call Play Mode ──────────────────────────────────────────
+    if event.is_private and chat > 0 and not str(chat).startswith("-"):
+        from .p2p_call import P2P_MANAGER
+        target_entity = await event.get_chat()
+        target_name = getattr(target_entity, "first_name", None) or f"User {chat}"
+        await xx.eor(f"📞 **Initiating 1:1 Private Call with [{target_name}](tg://user?id={chat})...**")
+        await P2P_MANAGER.start_call(
+            client=event.client,
+            target_entity=target_entity,
+            audio_path=song,
+            title=song_name,
+            duration=str(duration),
+            status_msg=xx,
+        )
+        return
+
     ultSongs = Player(chat, event)
     song_name = f"{song_name[:30]}..."
     if not ultSongs.group_call.is_connected:
