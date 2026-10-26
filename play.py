@@ -77,6 +77,8 @@ async def play_music_(event):
     if event.is_private and chat > 0 and not str(chat).startswith("-"):
         from .p2p_call import P2P_MANAGER
         target_entity = await event.get_chat()
+        if getattr(target_entity, "bot", False):
+            return await xx.eor("❌ **Telegram bots ko phone call nahi lagaya ja sakta!** Kripya kisi normal user ke PM me use karein.")
         target_name = getattr(target_entity, "first_name", None) or f"User {chat}"
         await xx.eor(f"📞 **Initiating 1:1 Private Call with [{target_name}](tg://user?id={chat})...**")
         await P2P_MANAGER.start_call(

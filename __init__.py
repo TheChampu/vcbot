@@ -96,12 +96,12 @@ API_URL = (
     or udB.get_key("YT_API_URL")
     or "https://api01.shrutibots.site"
 )
-API_KEY = os.environ.get("SHRUTI_API_KEY", "ShrutiBotsP3A8xKwYFafG6SuSLTIM")
+API_KEY = os.environ.get("SHRUTI_API_KEY", "ShrutiBotsPSfFcjvTLgzCNPn4k3mq")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Global state
 # ──────────────────────────────────────────────────────────────────────────────
-asstUserName = asst.me.username
+asstUserName = getattr(getattr(asst, "me", None), "username", None)
 LOG_CHANNEL  = udB.get_key("LOG_CHANNEL")
 
 ACTIVE_CALLS: list = []           # chat_ids currently in a voice call
